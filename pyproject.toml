@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "browseterm-device-agent"
+version = "0.1.0"
+description = "Browseterm Device Agent - the sole local-to-Cloud communication boundary (BROWSETERM_CLOUD_CONTROL_PLANE_MIGRATION.md Part 7)"
+authors = ["Zim95 <shresthanamah@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.12"
+grpcio = "^1.70.0"
+kubernetes = "^31.0.0"
+httpx = "^0.27.0"
+browseterm-device-control-spec = {git = "https://github.com/Zim95/browseterm-device-control-spec.git", rev = "main"}
+container-maker-spec = {git = "https://github.com/Zim95/container-maker-spec.git", rev = "main"}
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

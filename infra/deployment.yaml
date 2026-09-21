@@ -1,0 +1,123 @@
+# Device Agent Kubernetes manifests (Part 7). Deployed into the LOCAL k3s cluster (macOS/Windows
+# Multipass VM, or native Linux k3s) - never the Contabo prod cluster, which only ever runs Cloud.
+#
+# Placeholders below (image tag, storage class, resource limits) are deliberately not filled in
+# with invented values - the migration doc's own rule ("Do not invent infrastructure credentials
+# ... Add documented placeholders instead") applies here too, even for non-secret config, since
+# these depend on decisions (registry location, per-platform storage class name) not yet made.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: browseterm-device-agent
+  namespace: browseterm
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: browseterm-device-agent-journal
+  namespace: browseterm
+spec:
+  accessModes: ["ReadWriteOnce"]
+  # storageClassName: <TODO - the local runtime's default storage class, e.g. "local-path" for
+  # k3s's built-in local-path-provisioner>
+  resources:
+    requests:
+      storage: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: browseterm-device-agent
+  namespace: browseterm
+spec:
+  replicas: 1  # exactly one - a second replica would double-connect the same device identity
+  strategy:
+    type: Recreate  # never run two pods of this Deployment at once, even mid-rollout
+  selector:
+    matchLabels:
+      app: browseterm-device-agent
+  template:
+    metadata:
+      labels:
+        app: browseterm-device-agent
+    spec:
+      serviceAccountName: browseterm-device-agent
+      # Pod Security: non-privileged (migration doc, Part 7 "Non-responsibilities" +
+      # Part 23 "Non-privileged Device Agent").
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: device-agent
+          image: "<TODO: browseterm-device-agent image, once a registry/tag exists>"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: CLOUD_CONTROL_HOST
+              value: "app.browseterm.puhtaeto.com"
+            - name: CLOUD_CONTROL_PORT
+              value: "443"
+            - name: CONTAINER_MAKER_HOST
+              value: "container-maker-service"
+            - name: NAMESPACE
+              value: "browseterm"
+            - name: DEVICE_ID_FILE
+              value: "/etc/browseterm/device/device_id"
+            - name: DEVICE_TOKEN_FILE
+              value: "/etc/browseterm/device/token"
+            - name: COMMAND_JOURNAL_PATH
+              value: "/var/lib/browseterm/device-agent/journal.sqlite3"
+          volumeMounts:
+            - name: device-credential
+              mountPath: /etc/browseterm/device
+              readOnly: true
+            - name: journal
+              mountPath: /var/lib/browseterm/device-agent
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          livenessProbe:
+            exec:
+              # TODO (Part 24): a real liveness signal (e.g. a small local health file the
+              # ConnectionManager touches on every successful Hello/Heartbeat cycle) - not yet
+              # implemented; placeholder only.
+              command: ["true"]
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - name: device-credential
+          # Populated by the device-linking flow (Part 4) - a Secret, mode 0400, never a
+          # ConfigMap. Not created by this manifest; referenced by name only.
+          secret:
+            secretName: browseterm-device-credential
+            defaultMode: 0400
+        - name: journal
+          persistentVolumeClaim:
+            claimName: browseterm-device-agent-journal
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browseterm-device-agent-egress
+  namespace: browseterm
+spec:
+  podSelector:
+    matchLabels:
+      app: browseterm-device-agent
+  policyTypes: ["Egress"]
+  egress:
+    # Cloud (outbound only, port 443) - DNS resolution needed, so no fixed CIDR restriction here;
+    # tighten to Cloud's real egress IP range once known.
+    - {}
+  # Ingress from status_monitor/reaper/socket-ssh (Part 12) to the local API port is added when
+  # that part wires those callers - not yet defined here to avoid guessing their pod labels.
