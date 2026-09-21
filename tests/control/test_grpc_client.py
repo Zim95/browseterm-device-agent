@@ -82,3 +82,22 @@ class TestConnectionManager(IsolatedAsyncioTestCase):
 
     def test_build_unreported_results_empty_when_nothing_pending(self) -> None:
         self.assertEqual(self.manager.build_unreported_results(), [])
+
+    async def test_send_command_progress_queues_correct_message(self) -> None:
+        await self.manager.send_command_progress("cmd-1", "pushing_image", "pushing to registry")
+        sent = self.manager._outbound.get_nowait()
+        self.assertEqual(sent.WhichOneof("payload"), "command_progress")
+        self.assertEqual(sent.command_progress.progress_stage, "pushing_image")
+
+    async def test_send_local_event_queues_correct_message(self) -> None:
+        await self.manager.send_local_event("container_status_report", '{"a":1}')
+        sent = self.manager._outbound.get_nowait()
+        self.assertEqual(sent.WhichOneof("payload"), "local_event")
+        self.assertEqual(sent.local_event.event_type, "container_status_report")
+        self.assertEqual(sent.local_event.payload_json, '{"a":1}')
+
+    async def test_send_terminal_tunnel_registration_queues_correct_message(self) -> None:
+        await self.manager.send_terminal_tunnel_registration("ngrok", "https://x.example.com", 3, "online")
+        sent = self.manager._outbound.get_nowait()
+        self.assertEqual(sent.WhichOneof("payload"), "terminal_tunnel_registration")
+        self.assertEqual(sent.terminal_tunnel_registration.generation, 3)

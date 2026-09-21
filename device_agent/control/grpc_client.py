@@ -18,7 +18,8 @@ import grpc
 from device_control_spec import device_control_pb2_grpc
 from device_control_spec.device_control_pb2 import DeviceToCloud, CloudToDevice
 from device_control_spec.device_control_types_pb2 import (
-    Hello, Heartbeat, Pong, CommandResult, CommandAccepted, DevicePlatform, DeviceArchitecture,
+    Hello, Heartbeat, Pong, CommandResult, CommandAccepted, CommandProgress, LocalEvent,
+    TerminalTunnelRegistration, DevicePlatform, DeviceArchitecture,
     COMMAND_STATUS_SUCCEEDED, COMMAND_STATUS_FAILED,
 )
 
@@ -164,6 +165,22 @@ class ConnectionManager:
             result_json=json.dumps(result) if result is not None else "",
             error_code=error_code or "",
             error_message=error_message or "",
+        )))
+
+    async def send_command_progress(self, command_id: str, stage: str, message: str) -> None:
+        await self._send(DeviceToCloud(command_progress=CommandProgress(
+            command_id=command_id, progress_stage=stage, progress_message=message,
+        )))
+
+    async def send_local_event(self, event_type: str, payload_json: str) -> None:
+        '''Migration Part 12: the generic forwarding channel for local_api/service.py's
+        ReportContainerStatus (event_type="container_status_report") and any future local report
+        type that doesn't warrant its own dedicated wire message.'''
+        await self._send(DeviceToCloud(local_event=LocalEvent(event_type=event_type, payload_json=payload_json)))
+
+    async def send_terminal_tunnel_registration(self, provider: str, public_url: str, generation: int, status: str) -> None:
+        await self._send(DeviceToCloud(terminal_tunnel_registration=TerminalTunnelRegistration(
+            provider=provider, public_url=public_url, generation=generation, status=status,
         )))
 
     async def _handle_inbound(self, message: CloudToDevice) -> None:

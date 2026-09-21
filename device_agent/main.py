@@ -13,6 +13,9 @@ from device_agent.observability.logging_setup import configure_logging, get_logg
 configure_logging("browseterm-device-agent")
 logger = get_logger("main")
 
+import grpc
+from device_control_spec import local_device_agent_pb2_grpc
+
 from device_agent import config
 from device_agent.control.grpc_client import ConnectionManager
 from device_agent.commands.executor import CommandExecutor
@@ -23,6 +26,7 @@ from device_agent.commands import resume as resume_handler
 from device_agent.clients.container_maker_client import ContainerMakerClient
 from device_agent.clients.k8s_secrets import read_cert_from_k8s_secret
 from device_agent.clients.cloud_client import CloudClient
+from device_agent.local_api.service import LocalDeviceAgentServicer
 from device_agent.state.command_journal import CommandJournal
 from device_control_spec.device_control_types_pb2 import (
     COMMAND_OPERATION_CREATE, COMMAND_OPERATION_DELETE, COMMAND_OPERATION_HIBERNATE, COMMAND_OPERATION_RESUME,
@@ -79,11 +83,20 @@ async def run() -> None:
         on_execute_command=on_execute_command, startup_id=startup_id,
     )
 
+    local_api_server = grpc.aio.server()
+    local_device_agent_pb2_grpc.add_LocalDeviceAgentServicer_to_server(
+        LocalDeviceAgentServicer(connection_manager, cloud_client), local_api_server,
+    )
+    local_api_server.add_insecure_port(f"[::]:{config.LOCAL_API_PORT}")  # ClusterIP-only, NetworkPolicy-gated, not TLS
+
     logger.info("main.starting", extra={"device_id": device_id})
+    await local_api_server.start()
     try:
         await connection_manager.run_forever()
     finally:
+        await local_api_server.stop(5)
         container_maker_client.close()
+        await cloud_client.close()
 
 
 if __name__ == "__main__":

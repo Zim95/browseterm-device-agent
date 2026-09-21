@@ -12,6 +12,20 @@ metadata:
   namespace: browseterm
 ---
 apiVersion: v1
+kind: Service
+metadata:
+  name: browseterm-device-agent-local
+  namespace: browseterm
+spec:
+  type: ClusterIP
+  selector:
+    app: browseterm-device-agent
+  ports:
+    - name: local-api
+      port: 50061
+      targetPort: 50061
+---
+apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: browseterm-device-agent-journal
@@ -119,5 +133,34 @@ spec:
     # Cloud (outbound only, port 443) - DNS resolution needed, so no fixed CIDR restriction here;
     # tighten to Cloud's real egress IP range once known.
     - {}
-  # Ingress from status_monitor/reaper/socket-ssh (Part 12) to the local API port is added when
-  # that part wires those callers - not yet defined here to avoid guessing their pod labels.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: browseterm-device-agent-local-api-ingress
+  namespace: browseterm
+spec:
+  podSelector:
+    matchLabels:
+      app: browseterm-device-agent
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: browseterm-status-monitor
+        - podSelector:
+            matchLabels:
+              app: browseterm-reaper
+        - podSelector:
+            matchLabels:
+              app: browseterm-snapshot-job
+        - podSelector:
+            matchLabels:
+              app: browseterm-socket-ssh
+        - podSelector:
+            matchLabels:
+              app: browseterm-tunnel-registrar
+      ports:
+        - port: 50061
+          protocol: TCP
