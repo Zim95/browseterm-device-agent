@@ -17,19 +17,37 @@ from device_control_spec.local_device_agent_pb2 import Ack, CommandReference, Te
 
 from device_agent.clients.cloud_client import CloudClient
 from device_agent.control.grpc_client import ConnectionManager
+from device_agent.state.placement_cache import PlacementCache
 from device_agent.observability.logging_setup import get_logger
 
 logger = get_logger("local_api")
 
 
 class LocalDeviceAgentServicer(local_device_agent_pb2_grpc.LocalDeviceAgentServicer):
-    def __init__(self, connection_manager: ConnectionManager, cloud_client: CloudClient) -> None:
+    def __init__(self, connection_manager: ConnectionManager, cloud_client: CloudClient, placement_cache: PlacementCache = None) -> None:
         self.connection_manager = connection_manager
         self.cloud_client = cloud_client
+        self.placement_cache = placement_cache
 
     async def ReportContainerStatus(self, request, context) -> Ack:
+        '''status_monitor (a cluster-wide pod watcher) cannot know a container's real
+        placement_generation - nothing about a pod carries it (see placement_cache.py's own
+        docstring). Prefer this Device Agent's own record of the generation it placed the
+        container under; only fall back to the caller-supplied value (which is 0 from
+        status_monitor today) when this process has no record yet - that report then safely
+        no-ops server-side (conditional_container_update) rather than being trusted blindly.'''
+        placement_generation = request.placement_generation
+        if self.placement_cache is not None:
+            cached = self.placement_cache.get(request.container_id)
+            if cached is not None:
+                _, placement_generation = cached
+            else:
+                logger.warning(
+                    "local_api.report_container_status.no_placement_cache_entry",
+                    extra={"container_id": request.container_id},
+                )
         payload = {
-            "container_id": request.container_id, "placement_generation": request.placement_generation,
+            "container_id": request.container_id, "placement_generation": placement_generation,
             "observed_status": request.observed_status, "kubernetes_id": request.kubernetes_id or None,
         }
         await self.connection_manager.send_local_event("container_status_report", json.dumps(payload))

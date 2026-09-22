@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock
 
 from device_agent.commands.executor import CommandExecutor
 from device_agent.state.command_journal import CommandJournal
-from device_control_spec.device_control_types_pb2 import ExecuteCommand, COMMAND_OPERATION_CREATE, COMMAND_OPERATION_DELETE
+from device_agent.state.placement_cache import PlacementCache
+from device_control_spec.device_control_types_pb2 import (
+    ExecuteCommand, COMMAND_OPERATION_CREATE, COMMAND_OPERATION_DELETE,
+    COMMAND_OPERATION_HIBERNATE, COMMAND_OPERATION_RESUME,
+)
 
 
 class TestCommandExecutor(IsolatedAsyncioTestCase):
@@ -81,3 +85,96 @@ class TestCommandExecutor(IsolatedAsyncioTestCase):
         self.journal.record_accepted("cmd-1", "Create")
 
         await self.executor.execute("cmd-1", ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_CREATE))
+
+
+class TestCommandExecutorPlacementCache(IsolatedAsyncioTestCase):
+    '''migration Part 12 gap-fill: successful Create/Resume must populate the placement cache
+    (so ReportContainerStatus can later supply a real placement_generation); successful
+    Delete/Hibernate must clear it (the container no longer lives on this device).'''
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.journal = CommandJournal(os.path.join(self._tmpdir.name, "journal.sqlite3"))
+        self.placement_cache = PlacementCache()
+        self.executor = CommandExecutor(journal=self.journal, report_result=AsyncMock(), placement_cache=self.placement_cache)
+
+    def tearDown(self) -> None:
+        self._tmpdir.cleanup()
+
+    async def test_successful_create_records_placement(self) -> None:
+        async def handler(execute_command):
+            return {"kubernetes_id": "pod-1"}, None, None
+        self.executor.register(COMMAND_OPERATION_CREATE, handler)
+
+        await self.executor.execute(
+            "cmd-1",
+            ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_CREATE, container_id="c1", device_id="d1", placement_generation=1),
+        )
+
+        self.assertEqual(self.placement_cache.get("c1"), ("d1", 1))
+
+    async def test_successful_resume_updates_placement_generation(self) -> None:
+        self.placement_cache.record("c1", "d1", 1)
+
+        async def handler(execute_command):
+            return {"kubernetes_id": "pod-2"}, None, None
+        self.executor.register(COMMAND_OPERATION_RESUME, handler)
+
+        await self.executor.execute(
+            "cmd-2",
+            ExecuteCommand(command_id="cmd-2", operation=COMMAND_OPERATION_RESUME, container_id="c1", device_id="d1", placement_generation=2),
+        )
+
+        self.assertEqual(self.placement_cache.get("c1"), ("d1", 2))
+
+    async def test_failed_create_does_not_record_placement(self) -> None:
+        async def handler(execute_command):
+            return None, "CONTAINER_MAKER_ERROR", "node full"
+        self.executor.register(COMMAND_OPERATION_CREATE, handler)
+
+        await self.executor.execute(
+            "cmd-1",
+            ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_CREATE, container_id="c1", device_id="d1", placement_generation=1),
+        )
+
+        self.assertIsNone(self.placement_cache.get("c1"))
+
+    async def test_successful_delete_forgets_placement(self) -> None:
+        self.placement_cache.record("c1", "d1", 1)
+
+        async def handler(execute_command):
+            return {}, None, None
+        self.executor.register(COMMAND_OPERATION_DELETE, handler)
+
+        await self.executor.execute(
+            "cmd-1", ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_DELETE, container_id="c1", device_id="d1"),
+        )
+
+        self.assertIsNone(self.placement_cache.get("c1"))
+
+    async def test_successful_hibernate_forgets_placement(self) -> None:
+        self.placement_cache.record("c1", "d1", 1)
+
+        async def handler(execute_command):
+            return {"saved_image": "img:1"}, None, None
+        self.executor.register(COMMAND_OPERATION_HIBERNATE, handler)
+
+        await self.executor.execute(
+            "cmd-1", ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_HIBERNATE, container_id="c1", device_id="d1"),
+        )
+
+        self.assertIsNone(self.placement_cache.get("c1"))
+
+    async def test_no_placement_cache_does_not_raise(self) -> None:
+        '''placement_cache is optional (defaults to None) - existing callers that never pass one
+        must keep working unchanged.'''
+        executor = CommandExecutor(journal=self.journal, report_result=AsyncMock())
+
+        async def handler(execute_command):
+            return {}, None, None
+        executor.register(COMMAND_OPERATION_CREATE, handler)
+
+        await executor.execute(
+            "cmd-1",
+            ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_CREATE, container_id="c1", device_id="d1", placement_generation=1),
+        )  # must not raise

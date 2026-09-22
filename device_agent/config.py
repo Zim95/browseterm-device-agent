@@ -43,3 +43,11 @@ NAMESPACE: str = os.getenv("NAMESPACE", "browseterm")
 LOCAL_API_PORT: int = int(os.getenv("LOCAL_API_PORT", "50061"))
 
 RECONCILE_ON_STARTUP: bool = os.getenv("RECONCILE_ON_STARTUP", "true").lower() == "true"
+
+# Save/Hibernate completion polling (Parts 10/SAVE): container-maker's saveContainer RPC returns
+# as soon as it creates the snapshot Job, not once the tar->MinIO->snapshot_job->registry pipeline
+# actually finishes - the real completion signal only exists on Cloud (snapshot_job reports there
+# directly). Device Agent has no DB access, so it polls Cloud for the confirmed outcome instead of
+# trusting the RPC response. Docker builds can be slow, hence the generous timeout.
+SNAPSHOT_POLL_INTERVAL_SECONDS: float = float(os.getenv("SNAPSHOT_POLL_INTERVAL_SECONDS", "5"))
+SNAPSHOT_POLL_TIMEOUT_SECONDS: float = float(os.getenv("SNAPSHOT_POLL_TIMEOUT_SECONDS", "600"))

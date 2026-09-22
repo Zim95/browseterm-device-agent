@@ -47,3 +47,32 @@ class TestCloudClient(IsolatedAsyncioTestCase):
         result = await self.client.consume_terminal_ticket("bad")
 
         self.assertIsNone(result)
+
+    async def test_get_save_status_success(self) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"status": "Succeeded", "image_reference": "registry.example.com/img:1", "error_detail": None}
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_save_status("c1", "req-1")
+
+        self.assertEqual(result["status"], "Succeeded")
+        self.assertEqual(result["image_reference"], "registry.example.com/img:1")
+        self.client._client.get.assert_awaited_once_with(
+            "/devices/d1/containers/c1/save-status", params={"request_id": "req-1"},
+        )
+
+    async def test_get_save_status_not_found_returns_none_status(self) -> None:
+        response = MagicMock(status_code=404)
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_save_status("c1", "req-1")
+
+        self.assertIsNone(result["status"])
+
+    async def test_get_save_status_network_error_returns_none_status(self) -> None:
+        import httpx
+        self.client._client.get.side_effect = httpx.ConnectError("connection refused")
+
+        result = await self.client.get_save_status("c1", "req-1")
+
+        self.assertIsNone(result["status"])

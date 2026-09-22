@@ -3,6 +3,7 @@ from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 
 from device_agent.local_api.service import LocalDeviceAgentServicer
+from device_agent.state.placement_cache import PlacementCache
 from device_control_spec.local_device_agent_pb2 import (
     StatusReport, SnapshotProgress, HibernateRequest, TerminalTicketRequest, TunnelReport,
 )
@@ -26,6 +27,16 @@ class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
         payload = json.loads(payload_json)
         self.assertEqual(payload["container_id"], "c1")
         self.assertEqual(payload["kubernetes_id"], "pod-1")
+
+    async def test_report_container_status_without_placement_cache_uses_caller_value(self) -> None:
+        '''No placement_cache wired (defaults to None) - existing/simple callers must keep
+        working exactly as before this change.'''
+        await self.servicer.ReportContainerStatus(
+            StatusReport(container_id="c1", device_id="d1", placement_generation=5, observed_status="Running"),
+            context=None,
+        )
+        payload = json.loads(self.connection_manager.send_local_event.call_args[0][1])
+        self.assertEqual(payload["placement_generation"], 5)
 
     async def test_report_snapshot_progress_forwards_when_command_id_present(self) -> None:
         await self.servicer.ReportSnapshotProgress(
@@ -72,3 +83,39 @@ class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
         self.connection_manager.send_terminal_tunnel_registration.assert_awaited_once_with(
             "ngrok", "https://x.example.com", 3, "online",
         )
+
+
+class TestLocalDeviceAgentServicerPlacementCache(IsolatedAsyncioTestCase):
+    '''migration Part 12 gap-fill: status_monitor (a pod watcher) cannot know a container's real
+    placement_generation - the servicer must prefer its own cached record over the caller's
+    (unreliable) guess. See device_agent/state/placement_cache.py's own docstring.'''
+
+    def setUp(self) -> None:
+        self.connection_manager = AsyncMock()
+        self.cloud_client = AsyncMock()
+        self.placement_cache = PlacementCache()
+        self.servicer = LocalDeviceAgentServicer(self.connection_manager, self.cloud_client, self.placement_cache)
+
+    async def test_uses_cached_placement_generation_when_present(self) -> None:
+        self.placement_cache.record("c1", "d1", 7)
+
+        await self.servicer.ReportContainerStatus(
+            # caller sends a stale/unknown 0 - the cache's 7 must win.
+            StatusReport(container_id="c1", device_id="d1", placement_generation=0, observed_status="Running"),
+            context=None,
+        )
+
+        payload = json.loads(self.connection_manager.send_local_event.call_args[0][1])
+        self.assertEqual(payload["placement_generation"], 7)
+
+    async def test_falls_back_to_caller_value_when_cache_has_no_entry(self) -> None:
+        '''No CREATE/RESUME has run in this process for this container yet (e.g. fresh restart) -
+        forward what the caller sent; Cloud's own conditional update safely no-ops if it's wrong,
+        rather than this RPC failing outright.'''
+        await self.servicer.ReportContainerStatus(
+            StatusReport(container_id="unknown-container", device_id="d1", placement_generation=0, observed_status="Running"),
+            context=None,
+        )
+
+        payload = json.loads(self.connection_manager.send_local_event.call_args[0][1])
+        self.assertEqual(payload["placement_generation"], 0)

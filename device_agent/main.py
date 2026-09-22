@@ -23,13 +23,16 @@ from device_agent.commands import create as create_handler
 from device_agent.commands import delete as delete_handler
 from device_agent.commands import hibernate as hibernate_handler
 from device_agent.commands import resume as resume_handler
+from device_agent.commands import save as save_handler
 from device_agent.clients.container_maker_client import ContainerMakerClient
 from device_agent.clients.k8s_secrets import read_cert_from_k8s_secret
 from device_agent.clients.cloud_client import CloudClient
 from device_agent.local_api.service import LocalDeviceAgentServicer
 from device_agent.state.command_journal import CommandJournal
+from device_agent.state.placement_cache import PlacementCache
 from device_control_spec.device_control_types_pb2 import (
     COMMAND_OPERATION_CREATE, COMMAND_OPERATION_DELETE, COMMAND_OPERATION_HIBERNATE, COMMAND_OPERATION_RESUME,
+    COMMAND_OPERATION_SAVE,
 )
 
 
@@ -61,6 +64,7 @@ async def run() -> None:
         startup_id = ""  # optional in local/dev environments without a real supervisor
 
     journal = CommandJournal(config.COMMAND_JOURNAL_PATH)
+    placement_cache = PlacementCache()
     container_maker_client = _build_container_maker_client()
     cloud_client = CloudClient(device_id=device_id, device_token=device_token)
 
@@ -69,11 +73,12 @@ async def run() -> None:
     async def report_result(command_id, status, result, error_code, error_message):
         await connection_manager.send_command_result(command_id, status, result, error_code, error_message)
 
-    executor = CommandExecutor(journal=journal, report_result=report_result)
+    executor = CommandExecutor(journal=journal, report_result=report_result, placement_cache=placement_cache)
     executor.register(COMMAND_OPERATION_CREATE, create_handler.make_handler(container_maker_client, cloud_client))
     executor.register(COMMAND_OPERATION_DELETE, delete_handler.make_handler(container_maker_client, cloud_client))
     executor.register(COMMAND_OPERATION_HIBERNATE, hibernate_handler.make_handler(container_maker_client, cloud_client))
     executor.register(COMMAND_OPERATION_RESUME, resume_handler.make_handler(container_maker_client, cloud_client))
+    executor.register(COMMAND_OPERATION_SAVE, save_handler.make_handler(container_maker_client, cloud_client))
 
     async def on_execute_command(command_id, execute_command):
         await executor.execute(command_id, execute_command)
@@ -85,7 +90,7 @@ async def run() -> None:
 
     local_api_server = grpc.aio.server()
     local_device_agent_pb2_grpc.add_LocalDeviceAgentServicer_to_server(
-        LocalDeviceAgentServicer(connection_manager, cloud_client), local_api_server,
+        LocalDeviceAgentServicer(connection_manager, cloud_client, placement_cache), local_api_server,
     )
     local_api_server.add_insecure_port(f"[::]:{config.LOCAL_API_PORT}")  # ClusterIP-only, NetworkPolicy-gated, not TLS
 

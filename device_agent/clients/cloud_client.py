@@ -6,6 +6,10 @@ a fetch call (Parts 8-11 chose Cloud-sends-a-snapshot, both sanctioned by Part 5
 here exist because their callers (Reaper, Socket-SSH via local_api) need a synchronous answer the
 async control stream can't give: RequestHibernate needs a command reference back immediately, and
 ConsumeTerminalTicket needs the actual SSH target right now.
+
+get_save_status is a third such synchronous-answer call: save_execution.py's perform_save() polls
+it in a loop, since snapshot_job reports the real completion signal directly to Cloud (not to
+Device Agent), and Device Agent has no other way to learn a save's confirmed outcome.
 '''
 from typing import Optional
 
@@ -44,4 +48,23 @@ class CloudClient:
         response = await self._client.post("/internal/terminal-tickets/consume", json={"ticket": ticket})
         if response.status_code != 200:
             return None
+        return response.json()
+
+    async def get_save_status(self, container_id: str, request_id: str) -> dict:
+        '''GET /devices/{device_id}/containers/{container_id}/save-status?request_id=... . Backed
+        by the same container_snapshots row snapshot_job's own report call writes - see
+        browseterm-server's snapshot_handlers.py::get_save_status. Returns
+        {"status": "Pending"|"Running"|"Succeeded"|"Failed"|None, "image_reference": str|None,
+        "error_detail": str|None}. A non-200 response (device/container not found, wrong device)
+        is treated the same as "no result yet" (status=None) - the caller's poll loop just keeps
+        waiting until its own timeout, rather than needing a distinct error path here.'''
+        try:
+            response = await self._client.get(
+                f"/devices/{self.device_id}/containers/{container_id}/save-status",
+                params={"request_id": request_id},
+            )
+        except httpx.HTTPError:
+            return {"status": None, "image_reference": None, "error_detail": None}
+        if response.status_code != 200:
+            return {"status": None, "image_reference": None, "error_detail": None}
         return response.json()

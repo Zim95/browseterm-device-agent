@@ -87,9 +87,11 @@ class ContainerMakerClient:
             raise ContainerMakerClientError(f"Error deleting container in ContainerMaker: {e}") from e
 
     async def save_container(self, container_id: str, network_name: str, request_id: str = "") -> Any:
-        '''container-maker blocks until the snapshot Job completes - callers must run this in the
-        background and report progress separately (Part 10's SNAPSHOTTING/BUILDING_IMAGE/
-        PUSHING_IMAGE stages), not treat this single RPC's return as instantaneous.'''
+        '''Correction (2026-09-22): this RPC does NOT block until the snapshot Job completes - it
+        returns as soon as container-maker creates the Job, with a PREDICTED image name, not a
+        confirmed one (see container-maker's pod_manager.py::save_image docstring). Callers must
+        not treat this return as completion - use commands/save_execution.py's perform_save(),
+        which polls Cloud for the real confirmed outcome, rather than trusting this response.'''
         request = GRPCSaveContainerRequest(container_id=container_id, network_name=network_name)
         try:
             return await asyncio.to_thread(self._stub.saveContainer, request, metadata=(("x-request-id", request_id),))

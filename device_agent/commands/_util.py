@@ -7,12 +7,12 @@ def operation_name(operation_enum: int) -> str:
     and CommandExecutor need this mapping and must never drift apart on it.'''
     from device_control_spec.device_control_types_pb2 import (
         COMMAND_OPERATION_CREATE, COMMAND_OPERATION_DELETE, COMMAND_OPERATION_HIBERNATE,
-        COMMAND_OPERATION_RESUME, COMMAND_OPERATION_RECONCILE,
+        COMMAND_OPERATION_RESUME, COMMAND_OPERATION_RECONCILE, COMMAND_OPERATION_SAVE,
     )
     mapping = {
         COMMAND_OPERATION_CREATE: "Create", COMMAND_OPERATION_DELETE: "Delete",
         COMMAND_OPERATION_HIBERNATE: "Hibernate", COMMAND_OPERATION_RESUME: "Resume",
-        COMMAND_OPERATION_RECONCILE: "Reconcile",
+        COMMAND_OPERATION_RECONCILE: "Reconcile", COMMAND_OPERATION_SAVE: "Save",
     }
     return mapping.get(operation_enum, "Unknown")
 

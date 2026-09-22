@@ -145,22 +145,30 @@ spec:
       app: browseterm-device-agent
   policyTypes: ["Ingress"]
   ingress:
+    # Corrected during migration Part 12's actual caller rewiring to the REAL pod labels each
+    # workload's own manifest uses (none use a "browseterm-" prefix) - these podSelectors
+    # originally guessed at labels that don't exist anywhere, which would have silently blocked
+    # every caller under real NetworkPolicy enforcement despite the RPC wiring itself being
+    # correct. tunnel_registrar runs as a SIDECAR container inside the ngrok-agent Deployment's
+    # Pod (see socket-ssh/infra/deployment/deployment.yaml) - there is no separate
+    # "tunnel-registrar" pod/label to select, so its entry below is `app: ngrok-agent`, the label
+    # that Pod actually carries.
     - from:
         - podSelector:
             matchLabels:
-              app: browseterm-status-monitor
+              app: status-monitor
         - podSelector:
             matchLabels:
-              app: browseterm-reaper
+              app: reaper
         - podSelector:
             matchLabels:
-              app: browseterm-snapshot-job
+              app: snapshot-job
         - podSelector:
             matchLabels:
-              app: browseterm-socket-ssh
+              app: socket-ssh
         - podSelector:
             matchLabels:
-              app: browseterm-tunnel-registrar
+              app: ngrok-agent
       ports:
         - port: 50061
           protocol: TCP
