@@ -25,7 +25,7 @@ class TestResumeHandler(IsolatedAsyncioTestCase):
 
     async def test_resume_on_same_device_uses_saved_image(self) -> None:
         self.container_maker_client.create_container.return_value = SimpleNamespace(
-            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", ip_address="10.0.0.9",
+            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", container_ip="10.0.0.9",
         )
         execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
         result, error_code, error_message = await self.handler(execute_command)
@@ -34,6 +34,16 @@ class TestResumeHandler(IsolatedAsyncioTestCase):
         self.assertEqual(result["kubernetes_id"], "pod-abc123")
         _, kwargs = self.container_maker_client.create_container.call_args
         self.assertEqual(kwargs["image_name"], "registry.example.com/browseterm/user1/container1/img:1")
+
+    async def test_resume_reports_the_real_pod_ip(self) -> None:
+        '''Regression test - see create.py's matching test for the production bug this guards
+        against (container-maker-spec's response field is container_ip, not ip_address).'''
+        self.container_maker_client.create_container.return_value = SimpleNamespace(
+            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", container_ip="10.0.0.9",
+        )
+        execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
+        result, _, _ = await self.handler(execute_command)
+        self.assertEqual(result["ip_address"], "10.0.0.9")
 
     async def test_missing_saved_image_is_a_clean_failure(self) -> None:
         '''Doc-required: "Missing/corrupt image."'''

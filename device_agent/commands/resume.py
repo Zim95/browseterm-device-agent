@@ -63,7 +63,9 @@ def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
         container_name = strip_container_maker_suffix(response.container_name)
         return {
             "kubernetes_id": response.container_id, "container_name": container_name,
-            "ip_address": getattr(response, "ip_address", None),
+            # See create.py's matching comment - container-maker-spec's ContainerResponse names
+            # this field container_ip, not ip_address.
+            "ip_address": getattr(response, "container_ip", None),
             "associated_resources": {"network_name": cfg["network_name"]},
         }, None, None
 

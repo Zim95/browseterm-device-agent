@@ -25,7 +25,7 @@ class TestCreateHandler(IsolatedAsyncioTestCase):
 
     async def test_happy_path_strips_pod_suffix_and_returns_kubernetes_id(self) -> None:
         self.container_maker_client.create_container.return_value = SimpleNamespace(
-            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", ip_address="10.0.0.5",
+            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", container_ip="10.0.0.5",
         )
         execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
         result, error_code, error_message = await self.handler(execute_command)
@@ -34,9 +34,26 @@ class TestCreateHandler(IsolatedAsyncioTestCase):
         self.assertEqual(result["kubernetes_id"], "pod-abc123")
         self.assertEqual(result["container_name"], "my-terminal")
 
+    async def test_happy_path_reports_the_real_pod_ip(self) -> None:
+        '''
+        Regression test for a real production bug: container-maker-spec's ContainerResponse
+        names this field container_ip (see container-maker-spec/spec/types.proto), not
+        ip_address - the handler read getattr(response, "ip_address", None), which never matched
+        the real message and silently fell back to None every time. A container showed
+        "IP Address: Pending" forever even though the pod was genuinely Running with a real IP
+        the whole time - container-maker's own create() already waits for and returns it
+        correctly; the bug was purely in how this handler read the response back.
+        '''
+        self.container_maker_client.create_container.return_value = SimpleNamespace(
+            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", container_ip="10.0.0.5",
+        )
+        execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
+        result, _, _ = await self.handler(execute_command)
+        self.assertEqual(result["ip_address"], "10.0.0.5")
+
     async def test_service_suffix_without_timestamp_is_stripped(self) -> None:
         self.container_maker_client.create_container.return_value = SimpleNamespace(
-            container_id="pod-abc123", container_name="my-terminal-service", ip_address=None,
+            container_id="pod-abc123", container_name="my-terminal-service", container_ip=None,
         )
         execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
         result, _, _ = await self.handler(execute_command)

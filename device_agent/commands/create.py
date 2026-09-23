@@ -55,7 +55,13 @@ def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
         container_name = strip_container_maker_suffix(response.container_name)
         return {
             "kubernetes_id": response.container_id, "container_name": container_name,
-            "ip_address": getattr(response, "ip_address", None),
+            # container-maker-spec's ContainerResponse names this field container_ip, not
+            # ip_address (see container-maker-spec/spec/types.proto) - a real bug caught live:
+            # getattr(..., "ip_address", None) never matched, so every CREATE silently reported no
+            # IP at all even though container-maker's own create() already waits for and returns
+            # the real one. The container showed "IP Address: Pending" forever despite the pod
+            # being genuinely Running with a real IP the whole time.
+            "ip_address": getattr(response, "container_ip", None),
             "associated_resources": {"network_name": cfg["network_name"]},
         }, None, None
 
