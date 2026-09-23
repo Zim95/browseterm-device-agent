@@ -38,7 +38,7 @@ protobuf = "^5.29.0"
 type = "git"
 url = "https://github.com/Zim95/browseterm-device-control-spec.git"
 reference = "main"
-resolved_reference = "c61dd009a9579e3b35c702c9a0af0b1ad1718c89"
+resolved_reference = "abb775cd793eccf15806b1626e2dc5f3016553b6"
 
 [[package]]
 name = "certifi"

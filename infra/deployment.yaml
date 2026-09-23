@@ -1,15 +1,45 @@
 # Device Agent Kubernetes manifests (Part 7). Deployed into the LOCAL k3s cluster (macOS/Windows
 # Multipass VM, or native Linux k3s) - never the Contabo prod cluster, which only ever runs Cloud.
 #
-# Placeholders below (image tag, storage class, resource limits) are deliberately not filled in
-# with invented values - the migration doc's own rule ("Do not invent infrastructure credentials
-# ... Add documented placeholders instead") applies here too, even for non-secret config, since
-# these depend on decisions (registry location, per-platform storage class name) not yet made.
+# Image and storage class are now filled in (browseterm-desktop's local_stack.py, macOS Multipass
+# phase): `${REPO_NAME}/browseterm-device-agent:latest` (envsubst, same Docker Hub convention
+# every other local-stack component uses - see scripts/deployment/build.sh/setup.sh) and
+# `local-path` (k3s's own built-in default StorageClass, a fixed fact about k3s itself, not an
+# invented value). Resource limits below are still real placeholders where marked.
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: browseterm-device-agent
   namespace: browseterm
+---
+# main.py's read_cert_from_k8s_secret reads container-maker's client mTLS certs directly from the
+# k8s API (not a mounted volume - see device_agent/main.py) - this Role/RoleBinding is what makes
+# that read actually succeed instead of 403ing. Scoped to get/list on Secrets only, in this
+# namespace only (browseterm-desktop's local_stack.py, macOS Multipass phase - found missing
+# entirely when wiring Device Agent into the real local stack for the first time).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: browseterm-device-agent-secret-reader
+  namespace: browseterm
+rules:
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: browseterm-device-agent-secret-reader-binding
+  namespace: browseterm
+subjects:
+- kind: ServiceAccount
+  name: browseterm-device-agent
+  namespace: browseterm
+roleRef:
+  kind: Role
+  name: browseterm-device-agent-secret-reader
+  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: v1
 kind: Service
@@ -32,8 +62,10 @@ metadata:
   namespace: browseterm
 spec:
   accessModes: ["ReadWriteOnce"]
-  # storageClassName: <TODO - the local runtime's default storage class, e.g. "local-path" for
-  # k3s's built-in local-path-provisioner>
+  # k3s ships local-path-provisioner as its built-in default StorageClass - a fixed fact about
+  # k3s itself, not an invented/environment-specific value, so this is filled in directly rather
+  # than left as a placeholder or templated.
+  storageClassName: local-path
   resources:
     requests:
       storage: 256Mi
@@ -66,7 +98,8 @@ spec:
           type: RuntimeDefault
       containers:
         - name: device-agent
-          image: "<TODO: browseterm-device-agent image, once a registry/tag exists>"
+          image: "${REPO_NAME}/browseterm-device-agent:latest"
+          imagePullPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -79,6 +112,8 @@ spec:
               value: "443"
             - name: CONTAINER_MAKER_HOST
               value: "container-maker-service"
+            - name: CONTAINER_MAKER_CERTS_SECRET_NAME
+              value: "container-maker-service-certs"
             - name: NAMESPACE
               value: "browseterm"
             - name: DEVICE_ID_FILE
