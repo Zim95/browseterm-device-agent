@@ -70,8 +70,8 @@ async def run() -> None:
 
     connection_manager: ConnectionManager = None  # set below, referenced by the report_result closure
 
-    async def report_result(command_id, status, result, error_code, error_message):
-        await connection_manager.send_command_result(command_id, status, result, error_code, error_message)
+    async def report_result(command_id, status, placement_generation, result, error_code, error_message):
+        await connection_manager.send_command_result(command_id, status, placement_generation, result, error_code, error_message)
 
     executor = CommandExecutor(journal=journal, report_result=report_result, placement_cache=placement_cache)
     executor.register(COMMAND_OPERATION_CREATE, create_handler.make_handler(container_maker_client, cloud_client))

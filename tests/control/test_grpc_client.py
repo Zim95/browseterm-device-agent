@@ -99,6 +99,21 @@ class TestConnectionManager(IsolatedAsyncioTestCase):
         self.assertEqual(messages[0].WhichOneof("payload"), "command_result")
         self.assertEqual(messages[0].command_result.command_id, "cmd-1")
 
+    def test_build_unreported_results_carries_the_real_placement_generation(self) -> None:
+        '''
+        Regression test for a real production bug: a resent CommandResult never set
+        placement_generation, defaulting to 0 on the wire - Cloud's own staleness check rejects
+        any result whose generation doesn't match the container's current one, so every resend
+        (and, before the executor.py fix, every live send too) was silently and permanently
+        rejected. Caught live: Cloud logged "stale command_result rejected ...
+        result_generation: 0, current_generation: 1" for a command that had already finished
+        successfully on this side.
+        '''
+        self.journal.record_accepted("cmd-1", "Delete", placement_generation=1)
+        self.journal.record_result("cmd-1", "succeeded", result={"ok": True})
+        messages = self.manager.build_unreported_results()
+        self.assertEqual(messages[0].command_result.placement_generation, 1)
+
     def test_build_unreported_results_empty_when_nothing_pending(self) -> None:
         self.assertEqual(self.manager.build_unreported_results(), [])
 

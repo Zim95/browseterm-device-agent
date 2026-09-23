@@ -83,10 +83,15 @@ class ConnectionManager:
 
     def build_unreported_results(self) -> list:
         '''"Resend unacknowledged results from the local journal" - one CommandResult per
-        journal entry the Agent computed but never heard Cloud accept. `placement_generation`
-        isn't tracked in the journal (it's not needed for dedup) - Cloud's own staleness check on
-        the command row is authoritative regardless of what this resend carries, so a mismatched
-        generation here is safely rejected there rather than silently misapplied.'''
+        journal entry the Agent computed but never heard Cloud accept. placement_generation IS
+        carried here (from the journal, populated at record_accepted time from the original
+        ExecuteCommand) - a real bug caught live in production: Cloud's own staleness check
+        rejects a CommandResult whose generation doesn't match the container's current one, and a
+        resend with no generation at all defaults to 0, which mismatches almost any real
+        container (generation starts at 1 on its first command) - every resend was being silently
+        and permanently rejected as stale, logged on Cloud's side as "stale command_result
+        rejected ... result_generation: 0, current_generation: 1" for every attempt, not just
+        resends.'''
         return self._messages_for_entries(self.journal.unreported_terminal_entries())
 
     @staticmethod
@@ -98,6 +103,7 @@ class ConnectionManager:
                 result_json=entry.result_json or "",
                 error_code=entry.error_code or "",
                 error_message=entry.error_message or "",
+                placement_generation=entry.placement_generation,
             ))
             for entry in entries
         ]
@@ -166,15 +172,20 @@ class ConnectionManager:
             await self._outbound.put(message)
 
     async def send_command_result(
-        self, command_id: str, status: str, result: Optional[dict], error_code: Optional[str], error_message: Optional[str],
+        self, command_id: str, status: str, placement_generation: int,
+        result: Optional[dict], error_code: Optional[str], error_message: Optional[str],
     ) -> None:
-        '''The CommandExecutor's report_result callback. status is "succeeded" or "failed".'''
+        '''The CommandExecutor's report_result callback. status is "succeeded" or "failed".
+        placement_generation must be the exact value the triggering ExecuteCommand carried -
+        Cloud's own staleness check rejects (silently, permanently) any result whose generation
+        doesn't match the container's current one.'''
         await self._send(DeviceToCloud(command_result=CommandResult(
             command_id=command_id,
             status=_STATUS_TO_WIRE[status],
             result_json=json.dumps(result) if result is not None else "",
             error_code=error_code or "",
             error_message=error_message or "",
+            placement_generation=placement_generation,
         )))
 
     async def send_command_progress(self, command_id: str, stage: str, message: str) -> None:
@@ -224,7 +235,7 @@ class ConnectionManager:
             if self.journal.has_terminal_result(command_id):
                 logger.info("control.duplicate_command_ignored", extra={"command_id": command_id})
                 return
-            self.journal.record_accepted(command_id, operation_name(message.execute_command.operation))
+            self.journal.record_accepted(command_id, operation_name(message.execute_command.operation), message.execute_command.placement_generation)
             await self._send(DeviceToCloud(command_accepted=CommandAccepted(
                 command_id=command_id, accepted_at_unix_ms=int(time.time() * 1000),
             )))

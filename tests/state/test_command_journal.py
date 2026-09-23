@@ -27,6 +27,24 @@ class TestCommandJournal(TestCase):
         self.assertEqual(entry.status, "accepted")
         self.assertEqual(entry.operation, "Create")
 
+    def test_record_accepted_stores_placement_generation(self) -> None:
+        '''
+        Regression test for a real production bug: placement_generation was never captured
+        anywhere in the journal, so every resent CommandResult defaulted to generation 0 on the
+        wire - Cloud's own staleness check rejects any result whose generation doesn't match the
+        container's current one, silently and permanently. Caught live in production: a DELETE
+        that had already finished successfully on this side stayed stuck ACCEPTED in Cloud
+        forever, with Cloud logging "stale command_result rejected ... result_generation: 0,
+        current_generation: 1" on every single attempt.
+        '''
+        self.journal.record_accepted("cmd-1", "Delete", placement_generation=4)
+        entry = self.journal.get("cmd-1")
+        self.assertEqual(entry.placement_generation, 4)
+
+    def test_record_accepted_defaults_placement_generation_to_zero(self) -> None:
+        self.journal.record_accepted("cmd-1", "Create")
+        self.assertEqual(self.journal.get("cmd-1").placement_generation, 0)
+
     def test_has_terminal_result_false_while_only_accepted(self) -> None:
         '''The bug this distinction fixes: has_seen() alone can't tell "fully handled" apart from
         "accepted but never finished" (e.g. interrupted by a connection drop) - callers deciding

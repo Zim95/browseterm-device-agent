@@ -26,6 +26,7 @@ class JournalEntry:
     command_id: str
     operation: str
     status: str  # "accepted" | "running" | "succeeded" | "failed"
+    placement_generation: int
     result_json: Optional[str]
     error_code: Optional[str]
     error_message: Optional[str]
@@ -61,6 +62,7 @@ class CommandJournal:
                     command_id TEXT PRIMARY KEY,
                     operation TEXT NOT NULL,
                     status TEXT NOT NULL,
+                    placement_generation INTEGER NOT NULL DEFAULT 0,
                     result_json TEXT,
                     error_code TEXT,
                     error_message TEXT,
@@ -70,6 +72,14 @@ class CommandJournal:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_journal_reported ON command_journal (reported_to_cloud)")
+            # A journal.sqlite3 created before this column existed needs it added in place - this
+            # is a local, single-writer SQLite file on a PVC, not a tracked Postgres migration, so
+            # an idempotent ALTER here (ignoring the "duplicate column" error on repeat startups)
+            # is the whole migration story.
+            try:
+                conn.execute("ALTER TABLE command_journal ADD COLUMN placement_generation INTEGER NOT NULL DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
 
     def has_seen(self, command_id: str) -> bool:
         with self._lock, self._connect() as conn:
@@ -97,16 +107,20 @@ class CommandJournal:
             row = conn.execute("SELECT * FROM command_journal WHERE command_id = ?", (command_id,)).fetchone()
             return self._row_to_entry(row) if row else None
 
-    def record_accepted(self, command_id: str, operation: str) -> None:
+    def record_accepted(self, command_id: str, operation: str, placement_generation: int = 0) -> None:
         '''First time this command_id is seen - insert if absent, otherwise a no-op (a duplicate
-        ExecuteCommand for an already-known command must never reset its progress).'''
+        ExecuteCommand for an already-known command must never reset its progress).
+        placement_generation is captured here (from the incoming ExecuteCommand) because it must
+        travel with this command's eventual CommandResult - Cloud's own staleness check rejects
+        any result whose generation doesn't match the container's current one, silently and
+        permanently, if it's missing.'''
         now = datetime.now(timezone.utc).isoformat()
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO command_journal "
-                "(command_id, operation, status, reported_to_cloud, created_at, updated_at) "
-                "VALUES (?, ?, 'accepted', 0, ?, ?)",
-                (command_id, operation, now, now),
+                "(command_id, operation, status, placement_generation, reported_to_cloud, created_at, updated_at) "
+                "VALUES (?, ?, 'accepted', ?, 0, ?, ?)",
+                (command_id, operation, placement_generation, now, now),
             )
 
     def record_running(self, command_id: str) -> None:
@@ -156,6 +170,7 @@ class CommandJournal:
     def _row_to_entry(row: sqlite3.Row) -> JournalEntry:
         return JournalEntry(
             command_id=row["command_id"], operation=row["operation"], status=row["status"],
+            placement_generation=row["placement_generation"],
             result_json=row["result_json"], error_code=row["error_code"], error_message=row["error_message"],
             reported_to_cloud=bool(row["reported_to_cloud"]), created_at=row["created_at"], updated_at=row["updated_at"],
         )

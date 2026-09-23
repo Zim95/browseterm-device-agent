@@ -30,7 +30,8 @@ _UNPLACING_OPERATIONS = frozenset({"Delete", "Hibernate"})
 
 class CommandExecutor:
     def __init__(
-        self, journal: CommandJournal, report_result: Callable[[str, str, Optional[dict], Optional[str], Optional[str]], Awaitable[None]],
+        self, journal: CommandJournal,
+        report_result: Callable[[str, str, int, Optional[dict], Optional[str], Optional[str]], Awaitable[None]],
         placement_cache: Optional[PlacementCache] = None,
     ) -> None:
         self.journal = journal
@@ -45,7 +46,7 @@ class CommandExecutor:
         handler = self._handlers.get(execute_command.operation)
         if handler is None:
             logger.error("command.no_handler_registered", extra={"command_id": command_id, "operation": execute_command.operation})
-            await self._finish(command_id, "failed", None, "NO_HANDLER", f"No handler registered for operation {execute_command.operation}")
+            await self._finish(command_id, "failed", execute_command.placement_generation, None, "NO_HANDLER", f"No handler registered for operation {execute_command.operation}")
             return
 
         # Defensive: normally ConnectionManager._handle_inbound already called record_accepted
@@ -54,18 +55,18 @@ class CommandExecutor:
         # caller ever invokes it directly without that happening first, or a result could be
         # computed and reported to Cloud while never becoming locally durable/dedup-able.
         if not self.journal.has_seen(command_id):
-            self.journal.record_accepted(command_id, operation_name(execute_command.operation))
+            self.journal.record_accepted(command_id, operation_name(execute_command.operation), execute_command.placement_generation)
         self.journal.record_running(command_id)
         try:
             result, error_code, error_message = await handler(execute_command)
             if error_code is not None:
-                await self._finish(command_id, "failed", None, error_code, error_message)
+                await self._finish(command_id, "failed", execute_command.placement_generation, None, error_code, error_message)
             else:
                 self._update_placement_cache(execute_command)
-                await self._finish(command_id, "succeeded", result, None, None)
+                await self._finish(command_id, "succeeded", execute_command.placement_generation, result, None, None)
         except Exception as e:
             logger.error("command.handler_raised", exc_info=True, extra={"command_id": command_id})
-            await self._finish(command_id, "failed", None, "HANDLER_EXCEPTION", str(e)[:1000])
+            await self._finish(command_id, "failed", execute_command.placement_generation, None, "HANDLER_EXCEPTION", str(e)[:1000])
 
     def _update_placement_cache(self, execute_command: "ExecuteCommand") -> None:
         '''Only called after a handler succeeds. See _PLACING_OPERATIONS/_UNPLACING_OPERATIONS
@@ -78,8 +79,21 @@ class CommandExecutor:
         elif op in _UNPLACING_OPERATIONS:
             self.placement_cache.forget(execute_command.container_id)
 
-    async def _finish(self, command_id: str, status: str, result: Optional[dict], error_code: Optional[str], error_message: Optional[str]) -> None:
+    async def _finish(
+        self, command_id: str, status: str, placement_generation: int,
+        result: Optional[dict], error_code: Optional[str], error_message: Optional[str],
+    ) -> None:
         self.journal.record_result(command_id, status, result=result, error_code=error_code, error_message=error_message)
+        # placement_generation must travel with the result: Cloud's own staleness check on the
+        # command row rejects any CommandResult whose generation doesn't match the container's
+        # current one - silently and permanently, since a rejected result is never retried by
+        # Cloud. This field was part of the wire protocol from the start (CommandResult.
+        # placement_generation) but nothing on this side ever populated it, on either the live
+        # send below or a resend - a real bug caught live in production: a DELETE (and, earlier,
+        # a CREATE) finished successfully on this side, and Cloud's own logs showed "stale
+        # command_result rejected ... result_generation: 0, current_generation: 1" for every
+        # single attempt, live and resent alike, forever. Fixed by threading the generation
+        # ExecuteCommand always carried through record_accepted -> the journal -> here.
         # report_result only queues the CommandResult for send (see ConnectionManager._send) - it
         # does not wait for a transport-level ack, because CommandResult has none in this
         # protocol, and the outbound queue itself is discarded on every reconnect (grpc_client.py
@@ -94,4 +108,4 @@ class CommandExecutor:
         # actually round-tripped, so a lost-in-flight result keeps being resent on every
         # reconnect until that happens, relying on the same doc-mandated "duplicate delivery is
         # expected and safe" property Cloud's own command-result handling already guarantees.
-        await self.report_result(command_id, status, result, error_code, error_message)
+        await self.report_result(command_id, status, placement_generation, result, error_code, error_message)
