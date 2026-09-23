@@ -192,12 +192,18 @@ class ConnectionManager:
             })
         elif kind == "execute_command":
             command_id = message.execute_command.command_id
-            if self.journal.has_seen(command_id):
+            # has_terminal_result(), not has_seen() - has_seen() is also true for a command this
+            # process merely accepted-but-never-finished (e.g. the stream tore down mid-execution
+            # before a result existed), which made that command permanently unexecutable: every
+            # future redelivery hit this same check and was silently dropped, with nothing on
+            # either side ever able to make it progress again. Caught for real: a RESUME command
+            # sat "accepted" in Cloud's own device_commands row indefinitely, logging
+            # control.duplicate_command_ignored on every reconnect, never actually reaching
+            # Container Maker. Redelivery of an already-terminal command still needs no
+            # re-execution here - unreported_terminal_entries() (sent on every fresh connect)
+            # already covers "we finished but Cloud never acked it."
+            if self.journal.has_terminal_result(command_id):
                 logger.info("control.duplicate_command_ignored", extra={"command_id": command_id})
-                # Still worth re-acking/resending a stored result if we have one - but not
-                # re-executing. build_unreported_results (sent on every fresh connect) already
-                # covers the "we finished but never acked" case; a duplicate arriving mid-session
-                # for a command already terminal needs nothing further here.
                 return
             self.journal.record_accepted(command_id, operation_name(message.execute_command.operation))
             await self._send(DeviceToCloud(command_accepted=CommandAccepted(

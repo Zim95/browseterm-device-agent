@@ -1,5 +1,5 @@
 '''
-Part 7 required tests covered here: "Duplicate command delivery" (dedup via journal.has_seen),
+Part 7 required tests covered here: "Duplicate command delivery" (dedup via journal.has_terminal_result),
 Ping/Pong liveness reply, Hello/HelloAccepted handling, "Resend unacknowledged results from the
 local journal" (build_unreported_results).
 '''
@@ -46,16 +46,35 @@ class TestConnectionManager(IsolatedAsyncioTestCase):
         self.assertEqual(sent.WhichOneof("payload"), "command_accepted")
         self.assertEqual(sent.command_accepted.command_id, "cmd-1")
 
-    async def test_duplicate_execute_command_is_not_redispatched(self) -> None:
-        '''Doc-required: "Duplicate command delivery" must not re-run the handler.'''
+    async def test_duplicate_of_a_terminal_command_is_not_redispatched(self) -> None:
+        '''Doc-required: "Duplicate command delivery" must not re-run the handler - for a command
+        that actually finished. Journaling the terminal result directly (rather than relying on
+        on_execute_command, which is a bare mock here and would never call record_result on its
+        own) is what makes has_terminal_result() true for the redelivery below.'''
         message = CloudToDevice(execute_command=ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_CREATE))
         await self.manager._handle_inbound(message)
+        self.journal.record_result("cmd-1", "succeeded", result={"ok": True})
         self.on_execute_command.reset_mock()
         self.manager._outbound.get_nowait()  # drain the first CommandAccepted
 
         await self.manager._handle_inbound(message)  # redelivered
         self.on_execute_command.assert_not_awaited()
-        self.assertTrue(self.manager._outbound.empty(), "a duplicate must not re-send CommandAccepted either")
+        self.assertTrue(self.manager._outbound.empty(), "a duplicate of a terminal command must not re-send CommandAccepted either")
+
+    async def test_redelivery_of_an_interrupted_command_is_redispatched(self) -> None:
+        '''Real bug, caught live: a command this process merely accepted (never reached a
+        terminal result - e.g. the stream tore down mid-execution) must be retried on
+        redelivery, not silently dropped forever. has_seen()-based dedup got this wrong (true for
+        "accepted" too, not just terminal), which left a real RESUME command permanently stuck -
+        Cloud kept redelivering it, every redelivery was ignored, and Container Maker was never
+        actually called.'''
+        message = CloudToDevice(execute_command=ExecuteCommand(command_id="cmd-1", operation=COMMAND_OPERATION_CREATE))
+        await self.manager._handle_inbound(message)  # accepted, never finishes (mock, no record_result)
+        self.on_execute_command.reset_mock()
+        self.manager._outbound.get_nowait()  # drain the first CommandAccepted
+
+        await self.manager._handle_inbound(message)  # redelivered while still only "accepted"
+        self.on_execute_command.assert_awaited_once()
 
     async def test_ping_replies_with_pong_echoing_the_timestamp(self) -> None:
         message = CloudToDevice(ping=Ping(sent_at_unix_ms=123456))

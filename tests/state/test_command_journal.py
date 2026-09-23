@@ -27,6 +27,29 @@ class TestCommandJournal(TestCase):
         self.assertEqual(entry.status, "accepted")
         self.assertEqual(entry.operation, "Create")
 
+    def test_has_terminal_result_false_while_only_accepted(self) -> None:
+        '''The bug this distinction fixes: has_seen() alone can't tell "fully handled" apart from
+        "accepted but never finished" (e.g. interrupted by a connection drop) - callers deciding
+        whether to skip a redelivered command must use this, not has_seen().'''
+        self.journal.record_accepted("cmd-1", "Resume")
+        self.assertTrue(self.journal.has_seen("cmd-1"))
+        self.assertFalse(self.journal.has_terminal_result("cmd-1"))
+
+    def test_has_terminal_result_false_while_running(self) -> None:
+        self.journal.record_accepted("cmd-1", "Resume")
+        self.journal.record_running("cmd-1")
+        self.assertFalse(self.journal.has_terminal_result("cmd-1"))
+
+    def test_has_terminal_result_true_once_succeeded(self) -> None:
+        self.journal.record_accepted("cmd-1", "Resume")
+        self.journal.record_result("cmd-1", "succeeded", result={"kubernetes_id": "pod-1"})
+        self.assertTrue(self.journal.has_terminal_result("cmd-1"))
+
+    def test_has_terminal_result_true_once_failed(self) -> None:
+        self.journal.record_accepted("cmd-1", "Resume")
+        self.journal.record_result("cmd-1", "failed", error_code="E", error_message="boom")
+        self.assertTrue(self.journal.has_terminal_result("cmd-1"))
+
     def test_duplicate_record_accepted_does_not_reset_progress(self) -> None:
         '''Doc-required: "Duplicate command delivery" must be safe.'''
         self.journal.record_accepted("cmd-1", "Create")

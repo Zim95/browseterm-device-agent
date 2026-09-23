@@ -76,6 +76,22 @@ class CommandJournal:
             row = conn.execute("SELECT 1 FROM command_journal WHERE command_id = ?", (command_id,)).fetchone()
             return row is not None
 
+    def has_terminal_result(self, command_id: str) -> bool:
+        '''True only once this command actually finished ("succeeded"/"failed") - unlike
+        has_seen(), which is also true for "accepted"/"running" and therefore can't distinguish
+        "already fully handled, nothing to do" from "we started but a connection drop interrupted
+        us before we ever got a result." Callers deciding whether a redelivered ExecuteCommand
+        needs re-execution must use this, not has_seen() - see grpc_client.py's own comment on
+        where that distinction mattered in practice: a command accepted right as the stream tore
+        down stayed "accepted" forever, so has_seen()-based dedup silently ignored every future
+        redelivery of it, and it was never executed at all.'''
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM command_journal WHERE command_id = ? AND status IN ('succeeded', 'failed')",
+                (command_id,),
+            ).fetchone()
+            return row is not None
+
     def get(self, command_id: str) -> Optional[JournalEntry]:
         with self._lock, self._connect() as conn:
             row = conn.execute("SELECT * FROM command_journal WHERE command_id = ?", (command_id,)).fetchone()
