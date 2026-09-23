@@ -32,7 +32,12 @@ class TestCommandExecutor(IsolatedAsyncioTestCase):
         self.report_result.assert_awaited_once_with("cmd-1", "succeeded", {"kubernetes_id": "pod-1"}, None, None)
         entry = self.journal.get("cmd-1")
         self.assertEqual(entry.status, "succeeded")
-        self.assertTrue(entry.reported_to_cloud)
+        # _finish() no longer marks reported_to_cloud itself - queuing for send proves nothing
+        # about actual delivery (the outbound queue is discarded on reconnect). grpc_client.py's
+        # hello_accepted handler is what marks it, only once a live round-trip proves the resend
+        # went out - see executor.py's _finish() docstring for the production bug this fixed.
+        self.assertFalse(entry.reported_to_cloud)
+        self.assertIn("cmd-1", [e.command_id for e in self.journal.unreported_terminal_entries()])
 
     async def test_handler_returning_error_code_reports_failed(self) -> None:
         async def handler(execute_command):
@@ -74,7 +79,9 @@ class TestCommandExecutor(IsolatedAsyncioTestCase):
         self.assertTrue(self.journal.has_seen("cmd-1"))
         entry = self.journal.get("cmd-1")
         self.assertEqual(entry.status, "succeeded")
-        self.assertTrue(entry.reported_to_cloud)
+        # See test_successful_handler_reports_succeeded_and_journals - reported_to_cloud is now
+        # grpc_client.py's responsibility, confirmed only via a live hello_accepted round-trip.
+        self.assertFalse(entry.reported_to_cloud)
 
     async def test_journal_transitions_through_running_before_terminal(self) -> None:
         async def handler(execute_command):

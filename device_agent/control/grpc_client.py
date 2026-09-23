@@ -63,6 +63,10 @@ class ConnectionManager:
         self._channel_factory = channel_factory or self._default_channel_factory
         self._outbound: Optional[asyncio.Queue] = None
         self._stopped = False
+        # command_ids included in the current connection's initial resend batch
+        # (build_unreported_results), not yet confirmed reported - see _handle_inbound's
+        # hello_accepted branch for why marking happens there, not at send time.
+        self._pending_resend_ids: list = []
 
     def _default_channel_factory(self) -> grpc.aio.Channel:
         target = f"{CLOUD_CONTROL_HOST}:{CLOUD_CONTROL_PORT}"
@@ -83,16 +87,20 @@ class ConnectionManager:
         isn't tracked in the journal (it's not needed for dedup) - Cloud's own staleness check on
         the command row is authoritative regardless of what this resend carries, so a mismatched
         generation here is safely rejected there rather than silently misapplied.'''
-        messages = []
-        for entry in self.journal.unreported_terminal_entries():
-            messages.append(DeviceToCloud(command_result=CommandResult(
+        return self._messages_for_entries(self.journal.unreported_terminal_entries())
+
+    @staticmethod
+    def _messages_for_entries(entries: list) -> list:
+        return [
+            DeviceToCloud(command_result=CommandResult(
                 command_id=entry.command_id,
                 status=_STATUS_TO_WIRE[entry.status],
                 result_json=entry.result_json or "",
                 error_code=entry.error_code or "",
                 error_message=entry.error_message or "",
-            )))
-        return messages
+            ))
+            for entry in entries
+        ]
 
     async def run_forever(self) -> None:
         attempt = 0
@@ -123,7 +131,9 @@ class ConnectionManager:
 
             async def outbound_gen():
                 yield self.build_hello()
-                for resend in self.build_unreported_results():
+                unreported = self.journal.unreported_terminal_entries()
+                self._pending_resend_ids = [entry.command_id for entry in unreported]
+                for resend in self._messages_for_entries(unreported):
                     yield resend
                 while True:
                     item = await self._outbound.get()
@@ -190,6 +200,15 @@ class ConnectionManager:
                 "connection_generation": message.hello_accepted.connection_generation,
                 "reconciliation_required": message.hello_accepted.reconciliation_required,
             })
+            # Proof this connection's outbound direction is genuinely live (Cloud received our
+            # Hello and replied) - the strongest signal available in a protocol with no
+            # CommandResult ack. Only now do the entries from this connection's resend batch
+            # (queued right after Hello, same generator, same ordered stream) get marked
+            # reported - see executor.py's _finish() for why marking earlier, at send-queue
+            # time, was the actual bug.
+            for command_id in self._pending_resend_ids:
+                self.journal.mark_reported(command_id)
+            self._pending_resend_ids = []
         elif kind == "execute_command":
             command_id = message.execute_command.command_id
             # has_terminal_result(), not has_seen() - has_seen() is also true for a command this

@@ -82,12 +82,16 @@ class CommandExecutor:
         self.journal.record_result(command_id, status, result=result, error_code=error_code, error_message=error_message)
         # report_result only queues the CommandResult for send (see ConnectionManager._send) - it
         # does not wait for a transport-level ack, because CommandResult has none in this
-        # protocol. There's a narrow residual window where the connection drops between the queue
-        # accepting the message and it actually reaching the wire, in which case mark_reported
-        # below fires slightly early. This is deliberately not engineered away here: a lost result
-        # in that window becomes a "stuck transitional command" from Cloud's perspective, which
-        # Part 22's reconciliation loop is explicitly designed to detect and redeliver/reconcile -
-        # the same doc-mandated "duplicate delivery is expected and safe" property that makes
-        # resending on every reconnect safe also makes this acceptable.
+        # protocol, and the outbound queue itself is discarded on every reconnect (grpc_client.py
+        # replaces it fresh in _connect_once). Marking reported_to_cloud=1 here, right after
+        # queuing, used to race that: a connection drop between the queue accepting the message
+        # and it actually reaching the wire silently dropped the result forever, since it was
+        # already marked reported and unreported_terminal_entries() (the resend-on-reconnect
+        # mechanism) would never pick it up again - a real bug caught live in production (a
+        # CREATE's failure result stuck ACCEPTED in Cloud indefinitely while the connection
+        # cycled every ~60s). Deliberately NOT marking reported here any more - grpc_client.py
+        # now marks it only once a subsequent connection's hello_accepted proves the stream
+        # actually round-tripped, so a lost-in-flight result keeps being resent on every
+        # reconnect until that happens, relying on the same doc-mandated "duplicate delivery is
+        # expected and safe" property Cloud's own command-result handling already guarantees.
         await self.report_result(command_id, status, result, error_code, error_message)
-        self.journal.mark_reported(command_id)

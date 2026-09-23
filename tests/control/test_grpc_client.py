@@ -102,6 +102,33 @@ class TestConnectionManager(IsolatedAsyncioTestCase):
     def test_build_unreported_results_empty_when_nothing_pending(self) -> None:
         self.assertEqual(self.manager.build_unreported_results(), [])
 
+    async def test_hello_accepted_marks_this_connections_resend_batch_reported(self) -> None:
+        '''
+        Regression test for a real production bug: _finish() used to mark reported_to_cloud=1
+        as soon as a CommandResult was queued for send, which proved nothing about actual
+        delivery - the outbound queue is discarded on every reconnect (_connect_once creates a
+        fresh one), so a result queued right before a drop was silently lost forever while
+        already marked "reported", meaning unreported_terminal_entries() never resent it again.
+        Caught live: a CREATE's failure result stuck ACCEPTED in Cloud's own device_commands row
+        indefinitely while the connection cycled every ~60s. Fixed by deferring mark_reported
+        until hello_accepted proves this connection's resend batch actually round-tripped.
+        '''
+        self.journal.record_accepted("cmd-1", "Create")
+        self.journal.record_result("cmd-1", "failed", error_code="X", error_message="boom")
+        self.assertFalse(self.journal.get("cmd-1").reported_to_cloud)
+
+        self.manager._pending_resend_ids = ["cmd-1"]
+        message = CloudToDevice(hello_accepted=HelloAccepted(connection_generation=1))
+        await self.manager._handle_inbound(message)
+
+        self.assertTrue(self.journal.get("cmd-1").reported_to_cloud)
+        self.assertEqual(self.manager._pending_resend_ids, [])
+
+    async def test_hello_accepted_with_no_pending_resend_is_a_no_op(self) -> None:
+        message = CloudToDevice(hello_accepted=HelloAccepted(connection_generation=1))
+        await self.manager._handle_inbound(message)  # must not raise with an empty batch
+        self.assertEqual(self.manager._pending_resend_ids, [])
+
     async def test_send_command_progress_queues_correct_message(self) -> None:
         await self.manager.send_command_progress("cmd-1", "pushing_image", "pushing to registry")
         sent = self.manager._outbound.get_nowait()
