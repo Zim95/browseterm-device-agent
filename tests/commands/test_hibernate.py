@@ -115,6 +115,29 @@ class TestHibernateHandler(IsolatedAsyncioTestCase):
         payload = json.loads(error_message)
         self.assertEqual(payload["saved_image"], _REAL_IMAGE)
 
+    async def test_skip_save_deletes_pod_without_saving(self) -> None:
+        '''qa.md item 3: manual/UI hibernate must NOT save - skip_save=True in the command config
+        should go straight to delete_container, never touching save_container at all.'''
+        self.container_maker_client.delete_container.return_value = SimpleNamespace(container_id="pod-1", status="Deleted")
+
+        command = _execute_command(container_config_json=json.dumps({"network_name": "user1-namespace", "skip_save": True}))
+        result, error_code, error_message = await self.handler(command)
+
+        self.assertIsNone(error_code)
+        self.assertNotIn("saved_image", result)
+        self.container_maker_client.save_container.assert_not_awaited()
+        self.container_maker_client.delete_container.assert_awaited_once()
+
+    async def test_skip_save_delete_failure_is_reported(self) -> None:
+        self.container_maker_client.delete_container.side_effect = ContainerMakerClientError("pod delete timed out")
+
+        command = _execute_command(container_config_json=json.dumps({"network_name": "user1-namespace", "skip_save": True}))
+        result, error_code, error_message = await self.handler(command)
+
+        self.assertIsNone(result)
+        self.assertEqual(error_code, "POD_DELETE_FAILED")
+        self.container_maker_client.save_container.assert_not_awaited()
+
     async def test_duplicate_hibernate_command_is_independently_idempotent(self) -> None:
         '''Doc-required: "Duplicate hibernate command." Executing the handler twice (simulating
         two deliveries both reaching execution, e.g. before ConnectionManager-level dedup would

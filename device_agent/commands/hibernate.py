@@ -14,6 +14,14 @@ for the confirmed outcome before this handler does anything else.
 Hard invariant preserved: the pod is deleted ONLY after perform_save() reports a CONFIRMED
 success with a real (not predicted) saved image name. Any failure or timeout before that point
 leaves the pod running, untouched, quota still reserved.
+
+Correction (2026-09-25, qa.md items 3/4): manual (UI) hibernate and Reaper's idle-timeout
+hibernate are NOT the same operation - the owner's own QA spec requires manual hibernate to be
+fast (free the resource and delete the pod immediately, no automatic save; the user is expected
+to hit Save themselves first if they want a snapshot) while Reaper's hibernate must still save
+before deleting. Cloud threads that distinction through as `container_config_json["skip_save"]`
+(see container_config_snapshot.py::build_hibernate_config_json) - set true only for the
+browser-initiated `/app/containers/{id}/hibernate` route, never for Reaper's device-command path.
 '''
 import json
 
@@ -32,6 +40,22 @@ def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
             cfg = {}
         network_name = cfg.get("network_name", "")
         container_id = execute_command.container_id
+
+        if cfg.get("skip_save"):
+            # Manual/UI hibernate (qa.md item 3): free the resource fast - delete the pod
+            # directly, no save step at all. Whatever saved_image the container already had
+            # (from an earlier explicit Save) is left untouched by container_mutation.py, since
+            # this handler reports no saved_image here.
+            try:
+                await container_maker_client.delete_container(
+                    container_id=container_id, network_name=network_name, request_id=execute_command.trace_id,
+                )
+            except ContainerMakerClientError as e:
+                logger.error("command.hibernate.delete_failed", extra={
+                    "command_id": execute_command.command_id, "error": str(e),
+                })
+                return None, "POD_DELETE_FAILED", str(e)[:1000]
+            return {}, None, None
 
         # 1. Save, and WAIT for Cloud's confirmation - never proceed on the RPC's own return.
         #    Any failure/timeout here leaves the pod running and quota reserved (Part 10's
