@@ -15,6 +15,23 @@ from typing import Optional
 
 import httpx
 
+from device_agent.clients.retry import call_with_retry
+
+# request_hibernate is idempotent (a duplicate collapses to a no-op via Cloud's own partial
+# unique index on device_commands - see reaper's own request_hibernate docstring for the
+# equivalent property on its side of this same call), so any transport-level failure (never got a
+# response at all) is safe to retry broadly.
+def _is_retryable_transport_error(e: BaseException) -> bool:
+    return isinstance(e, httpx.HTTPError) and not isinstance(e, httpx.HTTPStatusError)
+
+
+# consume_terminal_ticket is NOT idempotent - a ticket is single-use, so retrying after a response
+# (even an error response) risks re-submitting a ticket the server already consumed successfully,
+# turning a real success into a false "invalid ticket" for the caller. Only retry the strictly
+# "never reached the server at all" cases.
+def _is_retryable_connect_error(e: BaseException) -> bool:
+    return isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+
 
 class CloudClient:
     def __init__(self, device_id: str, device_token: str, base_url: str = "https://app.browseterm.puhtaeto.com") -> None:
@@ -28,8 +45,17 @@ class CloudClient:
 
     async def request_hibernate(self, container_id: str) -> dict:
         '''POST /devices/{device_id}/containers/{container_id}/hibernate-request (Part 12).
-        Returns {"created": bool, "command_id": str|None, "error": str|None}.'''
-        response = await self._client.post(f"/devices/{self.device_id}/containers/{container_id}/hibernate-request")
+        Returns {"created": bool, "command_id": str|None, "error": str|None}. A transport-level
+        failure (Cloud briefly unreachable) is retried a few times before falling back to the
+        same "not created" shape every other rejection already uses - never raises, callers
+        (local_api/service.py's RequestHibernate) always get a well-formed response.'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post(f"/devices/{self.device_id}/containers/{container_id}/hibernate-request"),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            return {"created": False, "command_id": None, "error": str(e)}
         if response.status_code == 202:
             body = response.json()
             return {"created": True, "command_id": body.get("command", {}).get("id"), "error": None}
@@ -44,8 +70,17 @@ class CloudClient:
         browseterm-server's terminal_handlers.py::consume_terminal_session). Returns None if the
         ticket is invalid/expired/wrong-device/the container isn't available - the exact reason
         is intentionally not distinguished here, matching that endpoint's own "Invalid or expired
-        ticket" catch-all (never leaking which case it was).'''
-        response = await self._client.post("/internal/terminal-tickets/consume", json={"ticket": ticket})
+        ticket" catch-all (never leaking which case it was). A connect-level failure (request
+        never reached Cloud at all) is retried; anything past that point is NOT retried - a ticket
+        is single-use, so retrying after Cloud may already have consumed it risks turning a real
+        success into a false "invalid ticket" for the caller.'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post("/internal/terminal-tickets/consume", json={"ticket": ticket}),
+                is_retryable=_is_retryable_connect_error,
+            )
+        except httpx.HTTPError:
+            return None
         if response.status_code != 200:
             return None
         return response.json()

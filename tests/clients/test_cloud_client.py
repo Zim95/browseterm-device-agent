@@ -1,5 +1,7 @@
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
 
 from device_agent.clients.cloud_client import CloudClient
 
@@ -70,9 +72,50 @@ class TestCloudClient(IsolatedAsyncioTestCase):
         self.assertIsNone(result["status"])
 
     async def test_get_save_status_network_error_returns_none_status(self) -> None:
-        import httpx
         self.client._client.get.side_effect = httpx.ConnectError("connection refused")
 
         result = await self.client.get_save_status("c1", "req-1")
 
         self.assertIsNone(result["status"])
+
+    async def test_request_hibernate_retries_transport_error_then_succeeds(self) -> None:
+        response = MagicMock(status_code=202)
+        response.json.return_value = {"command": {"id": "cmd-1"}}
+        self.client._client.post.side_effect = [httpx.ConnectError("boom"), response]
+
+        with patch("device_agent.clients.retry.asyncio.sleep", new=AsyncMock()):
+            result = await self.client.request_hibernate("c1")
+
+        self.assertTrue(result["created"])
+        self.assertEqual(self.client._client.post.await_count, 2)
+
+    async def test_request_hibernate_gives_up_after_repeated_transport_errors(self) -> None:
+        self.client._client.post.side_effect = httpx.ConnectError("boom")
+
+        with patch("device_agent.clients.retry.asyncio.sleep", new=AsyncMock()):
+            result = await self.client.request_hibernate("c1")
+
+        self.assertFalse(result["created"])
+        self.assertIn("boom", result["error"])
+
+    async def test_consume_terminal_ticket_retries_connect_error_then_succeeds(self) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"container_id": "c1", "ssh_host": "10.0.0.5", "ssh_port": 22}
+        self.client._client.post.side_effect = [httpx.ConnectError("boom"), response]
+
+        with patch("device_agent.clients.retry.asyncio.sleep", new=AsyncMock()):
+            result = await self.client.consume_terminal_ticket("t1")
+
+        self.assertEqual(result["ssh_host"], "10.0.0.5")
+        self.assertEqual(self.client._client.post.await_count, 2)
+
+    async def test_consume_terminal_ticket_does_not_retry_read_timeout(self) -> None:
+        '''A ticket is single-use - a ReadTimeout means the request may already have reached and
+        been processed by Cloud, so retrying could falsely report an already-valid ticket as
+        invalid. Only a pure connect-level failure (never reached Cloud) is safe to retry.'''
+        self.client._client.post.side_effect = httpx.ReadTimeout("timed out")
+
+        result = await self.client.consume_terminal_ticket("t1")
+
+        self.assertIsNone(result)
+        self.assertEqual(self.client._client.post.await_count, 1)

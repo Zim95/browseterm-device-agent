@@ -1,9 +1,17 @@
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 
 from device_agent.clients.container_maker_client import ContainerMakerClient, ContainerMakerClientError
+
+
+class _RpcErrorWithCode(grpc.RpcError):
+    def __init__(self, code: grpc.StatusCode):
+        self._code = code
+
+    def code(self):
+        return self._code
 
 
 class TestContainerMakerClient(IsolatedAsyncioTestCase):
@@ -61,3 +69,29 @@ class TestContainerMakerClient(IsolatedAsyncioTestCase):
         self.client._stub.saveContainer.side_effect = grpc.RpcError()
         with self.assertRaises(ContainerMakerClientError):
             await self.client.save_container(container_id="c1", network_name="ns1")
+
+    async def test_create_container_retries_unavailable_then_succeeds(self) -> None:
+        self.client._stub.createContainer.side_effect = [
+            _RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE),
+            MagicMock(container_id="pod-1", container_name="my-terminal-pod-1"),
+        ]
+        with patch("device_agent.clients.retry.asyncio.sleep", new=AsyncMock()):
+            response = await self.client.create_container(
+                image_name="img", container_name="c1", network_name="ns1", exposure_level=0,
+                publish_information=[], environment_variables={}, cpu_request="1", cpu_limit="1",
+                memory_request="1Gi", memory_limit="1Gi", ephemeral_request="1Gi", ephemeral_limit="1Gi",
+                snapshot_size_limit=None,
+            )
+        self.assertEqual(response.container_id, "pod-1")
+        self.assertEqual(self.client._stub.createContainer.call_count, 2)
+
+    async def test_create_container_does_not_retry_non_transient_status(self) -> None:
+        self.client._stub.createContainer.side_effect = _RpcErrorWithCode(grpc.StatusCode.INVALID_ARGUMENT)
+        with self.assertRaises(ContainerMakerClientError):
+            await self.client.create_container(
+                image_name="img", container_name="c1", network_name="ns1", exposure_level=0,
+                publish_information=[], environment_variables={}, cpu_request="1", cpu_limit="1",
+                memory_request="1Gi", memory_limit="1Gi", ephemeral_request="1Gi", ephemeral_limit="1Gi",
+                snapshot_size_limit=None,
+            )
+        self.assertEqual(self.client._stub.createContainer.call_count, 1)

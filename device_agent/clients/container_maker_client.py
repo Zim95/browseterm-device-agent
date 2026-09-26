@@ -26,8 +26,16 @@ from container_maker_spec.types_pb2 import (
 )
 
 from device_agent.observability.logging_setup import get_logger
+from device_agent.clients.retry import call_with_retry
 
 logger = get_logger("container_maker_client")
+
+# Only retry UNAVAILABLE - "never actually reached container-maker" (a channel briefly down while
+# it restarts). Any other gRPC status means container-maker DID receive and process the request,
+# so retrying create/delete/save could risk a double side effect; leave those to surface
+# immediately instead of guessing at idempotency here.
+def _is_retryable(e: BaseException) -> bool:
+    return isinstance(e, grpc.RpcError) and (e.code() if hasattr(e, "code") else None) == grpc.StatusCode.UNAVAILABLE
 
 
 class ContainerMakerClientError(Exception):
@@ -75,14 +83,20 @@ class ContainerMakerClient:
             ),
         )
         try:
-            return await asyncio.to_thread(self._stub.createContainer, request, metadata=(("x-request-id", request_id),))
+            return await call_with_retry(
+                lambda: asyncio.to_thread(self._stub.createContainer, request, metadata=(("x-request-id", request_id),)),
+                is_retryable=_is_retryable,
+            )
         except grpc.RpcError as e:
             raise ContainerMakerClientError(f"Error creating container in ContainerMaker: {e}") from e
 
     async def delete_container(self, container_id: str, network_name: str, request_id: str = "") -> GRPCDeleteContainerResponse:
         request = GRPCDeleteContainerRequest(container_id=container_id, network_name=network_name)
         try:
-            return await asyncio.to_thread(self._stub.deleteContainer, request, metadata=(("x-request-id", request_id),))
+            return await call_with_retry(
+                lambda: asyncio.to_thread(self._stub.deleteContainer, request, metadata=(("x-request-id", request_id),)),
+                is_retryable=_is_retryable,
+            )
         except grpc.RpcError as e:
             raise ContainerMakerClientError(f"Error deleting container in ContainerMaker: {e}") from e
 
@@ -94,6 +108,9 @@ class ContainerMakerClient:
         which polls Cloud for the real confirmed outcome, rather than trusting this response.'''
         request = GRPCSaveContainerRequest(container_id=container_id, network_name=network_name)
         try:
-            return await asyncio.to_thread(self._stub.saveContainer, request, metadata=(("x-request-id", request_id),))
+            return await call_with_retry(
+                lambda: asyncio.to_thread(self._stub.saveContainer, request, metadata=(("x-request-id", request_id),)),
+                is_retryable=_is_retryable,
+            )
         except grpc.RpcError as e:
             raise ContainerMakerClientError(f"Error saving container in ContainerMaker: {e}") from e
