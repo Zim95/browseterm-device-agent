@@ -68,10 +68,17 @@ async def run() -> None:
     container_maker_client = _build_container_maker_client()
     cloud_client = CloudClient(device_id=device_id, device_token=device_token)
 
-    connection_manager: ConnectionManager = None  # set below, referenced by the report_result closure
-
     async def report_result(command_id, status, placement_generation, result, error_code, error_message):
-        await connection_manager.send_command_result(command_id, status, placement_generation, result, error_code, error_message)
+        # Added 2026-09-26: report over plain HTTP (cloud_client.report_command_result) instead
+        # of the Device Control stream - see that method's own docstring for why. On failure
+        # (Cloud unreachable even after retries), leave the journal entry unreported; the
+        # existing stream-based resend-on-reconnect mechanism (grpc_client.py's
+        # build_unreported_results, unchanged) still picks it up once the stream is next healthy.
+        ok = await cloud_client.report_command_result(command_id, status, result, error_code, error_message, placement_generation)
+        if ok:
+            journal.mark_reported(command_id)
+        else:
+            logger.warning("main.report_result_failed_will_resend_on_reconnect", extra={"command_id": command_id})
 
     executor = CommandExecutor(journal=journal, report_result=report_result, placement_cache=placement_cache)
     executor.register(COMMAND_OPERATION_CREATE, create_handler.make_handler(container_maker_client, cloud_client))

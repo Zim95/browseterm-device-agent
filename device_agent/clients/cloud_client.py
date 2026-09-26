@@ -103,3 +103,39 @@ class CloudClient:
         if response.status_code != 200:
             return {"status": None, "image_reference": None, "error_detail": None}
         return response.json()
+
+    async def report_command_result(
+        self, command_id: str, status: str, result: Optional[dict],
+        error_code: Optional[str], error_message: Optional[str], placement_generation: int,
+    ) -> bool:
+        '''POST /devices/{device_id}/commands/{command_id}/result (added 2026-09-26).
+
+        This is now the PRIMARY way a finished command's result reaches Cloud - not the Device
+        Control stream. That stream drops every ~30-90s in practice (Traefik's reverse-proxy
+        times out reading its long-lived response - see BROWSETERM_MIGRATION_PROGRESS.md's own
+        repeated notes on this), so a result queued on it could sit unreported for that long even
+        though the real work (pod deleted, pod created, save confirmed) had already finished -
+        this made Hibernate/Delete/Resume look "stuck" for up to ~90s. This call is a short-lived,
+        synchronous HTTP request/response, same as request_hibernate/get_save_status above, which
+        never had that problem.
+
+        Retries transient transport failures - this call reports a real, already-computed
+        outcome, so it's worth trying harder than a single attempt before giving up. Returns True
+        only on a confirmed 200 from Cloud; the caller (main.py's report_result) leaves the
+        journal entry unreported on any other outcome, so the existing stream-based
+        resend-on-reconnect mechanism (grpc_client.py's build_unreported_results) still catches it
+        eventually as a backstop - this is a faster PRIMARY path, not a replacement for that
+        safety net.'''
+        body = {
+            "status": status, "result": result, "placement_generation": placement_generation,
+            "error_code": error_code, "error_message": error_message,
+        }
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post(f"/devices/{self.device_id}/commands/{command_id}/result", json=body),
+                is_retryable=_is_retryable_transport_error,
+                max_attempts=5,
+            )
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200

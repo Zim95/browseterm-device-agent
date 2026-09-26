@@ -109,6 +109,49 @@ class TestCloudClient(IsolatedAsyncioTestCase):
         self.assertEqual(result["ssh_host"], "10.0.0.5")
         self.assertEqual(self.client._client.post.await_count, 2)
 
+    async def test_report_command_result_success_returns_true(self) -> None:
+        response = MagicMock(status_code=200)
+        self.client._client.post.return_value = response
+
+        ok = await self.client.report_command_result(
+            "cmd-1", "succeeded", {"saved_image": "repo:tag"}, None, None, placement_generation=3,
+        )
+
+        self.assertTrue(ok)
+        self.client._client.post.assert_awaited_once_with(
+            "/devices/d1/commands/cmd-1/result",
+            json={
+                "status": "succeeded", "result": {"saved_image": "repo:tag"}, "placement_generation": 3,
+                "error_code": None, "error_message": None,
+            },
+        )
+
+    async def test_report_command_result_non_200_returns_false(self) -> None:
+        response = MagicMock(status_code=404)
+        self.client._client.post.return_value = response
+
+        ok = await self.client.report_command_result("cmd-1", "succeeded", None, None, None, placement_generation=1)
+
+        self.assertFalse(ok)
+
+    async def test_report_command_result_retries_transport_error_then_succeeds(self) -> None:
+        response = MagicMock(status_code=200)
+        self.client._client.post.side_effect = [httpx.ConnectError("boom"), response]
+
+        with patch("device_agent.clients.retry.asyncio.sleep", new=AsyncMock()):
+            ok = await self.client.report_command_result("cmd-1", "failed", None, "ERR", "boom", placement_generation=1)
+
+        self.assertTrue(ok)
+        self.assertEqual(self.client._client.post.await_count, 2)
+
+    async def test_report_command_result_gives_up_after_repeated_failures_returns_false(self) -> None:
+        self.client._client.post.side_effect = httpx.ConnectError("boom")
+
+        with patch("device_agent.clients.retry.asyncio.sleep", new=AsyncMock()):
+            ok = await self.client.report_command_result("cmd-1", "succeeded", None, None, None, placement_generation=1)
+
+        self.assertFalse(ok)
+
     async def test_consume_terminal_ticket_does_not_retry_read_timeout(self) -> None:
         '''A ticket is single-use - a ReadTimeout means the request may already have reached and
         been processed by Cloud, so retrying could falsely report an already-valid ticket as
