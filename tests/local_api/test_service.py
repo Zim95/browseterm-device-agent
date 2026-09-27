@@ -54,6 +54,16 @@ class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
         ref = await self.servicer.RequestHibernate(HibernateRequest(container_id="c1", reason="idle_timeout"), context=None)
         self.assertTrue(ref.created)
         self.assertEqual(ref.command_id, "cmd-1")
+        self.cloud_client.request_hibernate.assert_awaited_once_with("c1", skip_save=False)
+
+    async def test_request_hibernate_pod_lost_requests_skip_save(self) -> None:
+        '''status_monitor's pod_watcher, for a crashed/externally-removed pod - nothing left to
+        snapshot, so this must request the same skip_save hibernate the browser's manual
+        hibernate route uses, not the default save-then-delete.'''
+        self.cloud_client.request_hibernate.return_value = {"created": True, "command_id": "cmd-1", "error": None}
+        ref = await self.servicer.RequestHibernate(HibernateRequest(container_id="c1", reason="pod_lost"), context=None)
+        self.assertTrue(ref.created)
+        self.cloud_client.request_hibernate.assert_awaited_once_with("c1", skip_save=True)
 
     async def test_request_hibernate_failure(self) -> None:
         self.cloud_client.request_hibernate.return_value = {"created": False, "command_id": None, "error": "already hibernating"}

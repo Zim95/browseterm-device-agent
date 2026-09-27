@@ -20,7 +20,20 @@ class TestCloudClient(IsolatedAsyncioTestCase):
 
         self.assertTrue(result["created"])
         self.assertEqual(result["command_id"], "cmd-1")
-        self.client._client.post.assert_awaited_once_with("/devices/d1/containers/c1/hibernate-request")
+        self.client._client.post.assert_awaited_once_with("/devices/d1/containers/c1/hibernate-request", json={})
+
+    async def test_request_hibernate_skip_save_sends_flag(self) -> None:
+        '''status_monitor's pod_watcher, for a crashed/lost pod - nothing left to snapshot.'''
+        response = MagicMock(status_code=202)
+        response.json.return_value = {"command": {"id": "cmd-1"}}
+        self.client._client.post.return_value = response
+
+        result = await self.client.request_hibernate("c1", skip_save=True)
+
+        self.assertTrue(result["created"])
+        self.client._client.post.assert_awaited_once_with(
+            "/devices/d1/containers/c1/hibernate-request", json={"skip_save": True},
+        )
 
     async def test_request_hibernate_failure(self) -> None:
         response = MagicMock(status_code=409)

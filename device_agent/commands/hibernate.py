@@ -20,8 +20,17 @@ hibernate are NOT the same operation - the owner's own QA spec requires manual h
 fast (free the resource and delete the pod immediately, no automatic save; the user is expected
 to hit Save themselves first if they want a snapshot) while Reaper's hibernate must still save
 before deleting. Cloud threads that distinction through as `container_config_json["skip_save"]`
-(see container_config_snapshot.py::build_hibernate_config_json) - set true only for the
-browser-initiated `/app/containers/{id}/hibernate` route, never for Reaper's device-command path.
+(see container_config_snapshot.py::build_hibernate_config_json) - set true for the
+browser-initiated `/app/containers/{id}/hibernate` route AND for status_monitor's pod_watcher
+reporting a crashed/lost pod (RequestHibernate reason="pod_lost", see local_api/service.py) -
+never for Reaper's own idle-timeout device-command path.
+
+Correction (2026-09-27): the skip_save delete used to assume the pod was still there. It no
+longer can - a lost/crashed pod (restart_policy: Never, see container-maker's pod_manager.py) may
+already be gone by the time this runs, or a DELETED watch event may have already removed it
+entirely. "Missing pod is success" - mirrors commands/delete.py's own identical, pre-existing
+heuristic for the exact same container-maker limitation (no distinct NOT_FOUND status code, see
+that module's docstring).
 '''
 import json
 
@@ -30,6 +39,8 @@ from device_agent.commands.save_execution import perform_save
 from device_agent.observability.logging_setup import get_logger
 
 logger = get_logger("command.hibernate")
+
+_ALREADY_GONE_MARKERS = ("404", "not found", "notfound")
 
 
 def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
@@ -51,6 +62,12 @@ def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
                     container_id=container_id, network_name=network_name, request_id=execute_command.trace_id,
                 )
             except ContainerMakerClientError as e:
+                message = str(e).lower()
+                if any(marker in message for marker in _ALREADY_GONE_MARKERS):
+                    logger.info("command.hibernate.already_gone_treated_as_success", extra={
+                        "command_id": execute_command.command_id,
+                    })
+                    return {}, None, None
                 logger.error("command.hibernate.delete_failed", extra={
                     "command_id": execute_command.command_id, "error": str(e),
                 })

@@ -138,6 +138,20 @@ class TestHibernateHandler(IsolatedAsyncioTestCase):
         self.assertEqual(error_code, "POD_DELETE_FAILED")
         self.container_maker_client.save_container.assert_not_awaited()
 
+    async def test_skip_save_delete_already_gone_is_treated_as_success(self) -> None:
+        '''status_monitor's pod_watcher requests this (reason="pod_lost") for a pod that crashed
+        or was already externally removed - by the time this handler runs, container-maker's own
+        delete may find nothing there at all. Mirrors commands/delete.py's own identical
+        "missing pod is success" heuristic (container-maker has no distinct NOT_FOUND status).'''
+        self.container_maker_client.delete_container.side_effect = ContainerMakerClientError("404 pod not found")
+
+        command = _execute_command(container_config_json=json.dumps({"network_name": "user1-namespace", "skip_save": True}))
+        result, error_code, error_message = await self.handler(command)
+
+        self.assertIsNone(error_code)
+        self.assertEqual(result, {})
+        self.container_maker_client.save_container.assert_not_awaited()
+
     async def test_duplicate_hibernate_command_is_independently_idempotent(self) -> None:
         '''Doc-required: "Duplicate hibernate command." Executing the handler twice (simulating
         two deliveries both reaching execution, e.g. before ConnectionManager-level dedup would

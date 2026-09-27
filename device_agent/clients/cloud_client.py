@@ -43,15 +43,24 @@ class CloudClient:
     async def close(self) -> None:
         await self._client.aclose()
 
-    async def request_hibernate(self, container_id: str) -> dict:
+    async def request_hibernate(self, container_id: str, skip_save: bool = False) -> dict:
         '''POST /devices/{device_id}/containers/{container_id}/hibernate-request (Part 12).
         Returns {"created": bool, "command_id": str|None, "error": str|None}. A transport-level
         failure (Cloud briefly unreachable) is retried a few times before falling back to the
         same "not created" shape every other rejection already uses - never raises, callers
-        (local_api/service.py's RequestHibernate) always get a well-formed response.'''
+        (local_api/service.py's RequestHibernate) always get a well-formed response.
+
+        skip_save (added 2026-09-27, for status_monitor's pod_watcher reporting a crashed/lost
+        pod): the pod is already gone or unusable by the time this fires, so there is nothing
+        left to snapshot - forwarded to Cloud so it builds the same skip_save HIBERNATE config
+        the browser's own manual hibernate route already uses, which deletes (or no-ops on an
+        already-gone) pod directly instead of attempting a doomed save first.'''
         try:
             response = await call_with_retry(
-                lambda: self._client.post(f"/devices/{self.device_id}/containers/{container_id}/hibernate-request"),
+                lambda: self._client.post(
+                    f"/devices/{self.device_id}/containers/{container_id}/hibernate-request",
+                    json={"skip_save": True} if skip_save else {},
+                ),
                 is_retryable=_is_retryable_transport_error,
             )
         except httpx.HTTPError as e:

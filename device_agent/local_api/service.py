@@ -59,7 +59,13 @@ class LocalDeviceAgentServicer(local_device_agent_pb2_grpc.LocalDeviceAgentServi
         return Ack(ok=True)
 
     async def RequestHibernate(self, request, context) -> CommandReference:
-        result = await self.cloud_client.request_hibernate(request.container_id)
+        '''reason="pod_lost" (status_monitor's pod_watcher, for a crashed or externally-removed
+        pod) requests a skip_save hibernate - the pod is already gone/unusable, so there is
+        nothing to snapshot; every other reason ("idle_timeout"/"manual", Reaper's own callers)
+        keeps the default save-then-delete behavior.'''
+        result = await self.cloud_client.request_hibernate(
+            request.container_id, skip_save=(request.reason == "pod_lost"),
+        )
         return CommandReference(
             created=result["created"], command_id=result.get("command_id") or "", error=result.get("error") or "",
         )
