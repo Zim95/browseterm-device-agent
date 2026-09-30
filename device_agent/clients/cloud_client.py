@@ -113,6 +113,24 @@ class CloudClient:
             return {"status": None, "image_reference": None, "error_detail": None}
         return response.json()
 
+    async def get_tunnel_generation(self) -> Optional[int]:
+        '''GET /devices/{device_id}/tunnel/generation - Cloud's own authoritative
+        devices.tunnel_generation for this device, 0 if it has never registered a tunnel at all.
+        Backs local_api's GetTunnelGeneration RPC, which Tunnel Registrar calls on startup to
+        resync a locally-persisted counter that may have fallen behind Cloud's real value (its own
+        PVC lost/recreated, or a manual reset that undershot) - the exact gap that let a 2026-09-30
+        incident silently reject every one of its reports forever, with nothing surfacing the
+        rejection back to the registrar. Returns None (not 0) on any failure to reach Cloud, so
+        the caller can tell "genuinely zero" apart from "couldn't check" and fall back to trusting
+        its own local value alone rather than wrongly resetting a real counter to 0.'''
+        try:
+            response = await self._client.get(f"/devices/{self.device_id}/tunnel/generation")
+        except httpx.HTTPError:
+            return None
+        if response.status_code != 200:
+            return None
+        return response.json().get("generation")
+
     async def report_command_result(
         self, command_id: str, status: str, result: Optional[dict],
         error_code: Optional[str], error_message: Optional[str], placement_generation: int,

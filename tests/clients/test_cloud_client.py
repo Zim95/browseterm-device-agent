@@ -91,6 +91,33 @@ class TestCloudClient(IsolatedAsyncioTestCase):
 
         self.assertIsNone(result["status"])
 
+    async def test_get_tunnel_generation_success(self) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"generation": 35}
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_tunnel_generation()
+
+        self.assertEqual(result, 35)
+        self.client._client.get.assert_awaited_once_with("/devices/d1/tunnel/generation")
+
+    async def test_get_tunnel_generation_not_found_returns_none(self) -> None:
+        response = MagicMock(status_code=404)
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_tunnel_generation()
+
+        self.assertIsNone(result)
+
+    async def test_get_tunnel_generation_network_error_returns_none(self) -> None:
+        '''None (not 0) on any failure to reach Cloud - a caller must be able to tell "couldn't
+        check" apart from "genuinely zero" and fall back to trusting its own local value.'''
+        self.client._client.get.side_effect = httpx.ConnectError("connection refused")
+
+        result = await self.client.get_tunnel_generation()
+
+        self.assertIsNone(result)
+
     async def test_request_hibernate_retries_transport_error_then_succeeds(self) -> None:
         response = MagicMock(status_code=202)
         response.json.return_value = {"command": {"id": "cmd-1"}}

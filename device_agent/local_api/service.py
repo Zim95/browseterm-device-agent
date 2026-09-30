@@ -13,7 +13,7 @@ async stream, so they go through CloudClient's device-scoped HTTP calls instead.
 import json
 
 from device_control_spec import local_device_agent_pb2_grpc
-from device_control_spec.local_device_agent_pb2 import Ack, CommandReference, TerminalTarget
+from device_control_spec.local_device_agent_pb2 import Ack, CommandReference, GetTunnelGenerationResponse, TerminalTarget
 
 from device_agent.clients.cloud_client import CloudClient
 from device_agent.control.grpc_client import ConnectionManager
@@ -85,3 +85,13 @@ class LocalDeviceAgentServicer(local_device_agent_pb2_grpc.LocalDeviceAgentServi
             request.provider, request.public_url, request.generation, request.status,
         )
         return Ack(ok=True)
+
+    async def GetTunnelGeneration(self, request, context) -> GetTunnelGenerationResponse:
+        '''Synchronous, unlike ReportTunnel above (fire-and-forget over the control stream) -
+        Tunnel Registrar needs an actual answer to resync against, not just an Ack, so this goes
+        through cloud_client's device-scoped HTTP path instead (same reasoning as
+        RequestHibernate/ConsumeTerminalTicket). On a failure to reach Cloud, returns 0 rather
+        than raising - a caller resyncing as max(local, 0) is a safe no-op, never a regression of
+        its own already-correct local value.'''
+        generation = await self.cloud_client.get_tunnel_generation()
+        return GetTunnelGenerationResponse(generation=generation if generation is not None else 0)

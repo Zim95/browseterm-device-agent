@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 from device_agent.local_api.service import LocalDeviceAgentServicer
 from device_agent.state.placement_cache import PlacementCache
 from device_control_spec.local_device_agent_pb2 import (
-    StatusReport, SnapshotProgress, HibernateRequest, TerminalTicketRequest, TunnelReport,
+    GetTunnelGenerationRequest, StatusReport, SnapshotProgress, HibernateRequest, TerminalTicketRequest, TunnelReport,
 )
 
 
@@ -93,6 +93,18 @@ class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
         self.connection_manager.send_terminal_tunnel_registration.assert_awaited_once_with(
             "ngrok", "https://x.example.com", 3, "online",
         )
+
+    async def test_get_tunnel_generation_returns_clouds_value(self) -> None:
+        self.cloud_client.get_tunnel_generation.return_value = 35
+        response = await self.servicer.GetTunnelGeneration(GetTunnelGenerationRequest(), context=None)
+        self.assertEqual(response.generation, 35)
+
+    async def test_get_tunnel_generation_falls_back_to_zero_on_cloud_failure(self) -> None:
+        '''Never raises, never returns None to the caller (protobuf int32 can't carry that
+        distinction anyway) - a caller resyncing as max(local, 0) is a safe no-op.'''
+        self.cloud_client.get_tunnel_generation.return_value = None
+        response = await self.servicer.GetTunnelGeneration(GetTunnelGenerationRequest(), context=None)
+        self.assertEqual(response.generation, 0)
 
 
 class TestLocalDeviceAgentServicerPlacementCache(IsolatedAsyncioTestCase):
