@@ -45,6 +45,19 @@ class TestResumeHandler(IsolatedAsyncioTestCase):
         result, _, _ = await self.handler(execute_command)
         self.assertEqual(result["ip_address"], "10.0.0.9")
 
+    async def test_associated_resources_records_the_raw_pod_name(self) -> None:
+        '''See create.py's matching test - same production gap (2026-09-30), same fix, on the
+        RESUME path (the second, symmetric place a container's pod gets (re)created).'''
+        self.container_maker_client.create_container.return_value = SimpleNamespace(
+            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", container_ip="10.0.0.9",
+        )
+        execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
+        result, _, _ = await self.handler(execute_command)
+
+        pod_entries = [r for r in result["associated_resources"] if r["resource_type"] == "pod"]
+        self.assertEqual(len(pod_entries), 1)
+        self.assertEqual(pod_entries[0]["resource_name"], "my-terminal-pod-1706565890")
+
     async def test_missing_saved_image_is_a_clean_failure(self) -> None:
         '''Doc-required: "Missing/corrupt image."'''
         execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config(saved_image=""))

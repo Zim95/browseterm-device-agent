@@ -66,7 +66,15 @@ def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
             # See create.py's matching comment - container-maker-spec's ContainerResponse names
             # this field container_ip, not ip_address.
             "ip_address": getattr(response, "container_ip", None),
-            "associated_resources": {"network_name": cfg["network_name"]},
+            # See create.py's matching comment: response.container_name (BEFORE the strip above)
+            # is the pod's own raw, timestamped name - what container-maker's
+            # find_container_pod/_stored_pod_name needs to resolve this container's pod exactly
+            # on a later SAVE, instead of always falling back to its less precise `app`-label
+            # match.
+            "associated_resources": [
+                {"resource_type": "pod", "resource_name": response.container_name},
+                {"resource_type": "network", "resource_name": cfg["network_name"]},
+            ],
         }, None, None
 
     return handle

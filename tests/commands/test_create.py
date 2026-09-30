@@ -51,6 +51,26 @@ class TestCreateHandler(IsolatedAsyncioTestCase):
         result, _, _ = await self.handler(execute_command)
         self.assertEqual(result["ip_address"], "10.0.0.5")
 
+    async def test_associated_resources_records_the_raw_pod_name(self) -> None:
+        '''
+        Regression test for a real production gap (2026-09-30): associated_resources only ever
+        recorded network_name, never the pod itself, so container-maker's
+        find_container_pod/_stored_pod_name (which needs the exact, timestamped pod name) always
+        fell through to its less precise `app`-label fallback on a later SAVE - harmless only as
+        long as no two pods ever shared that label, which a real orphaned-pod incident violated.
+        Must record the RAW response.container_name (with its "-pod-<timestamp>" suffix intact),
+        not the stripped display name used for result["container_name"].
+        '''
+        self.container_maker_client.create_container.return_value = SimpleNamespace(
+            container_id="pod-abc123", container_name="my-terminal-pod-1706565890", container_ip="10.0.0.5",
+        )
+        execute_command = ExecuteCommand(command_id="cmd-1", container_config_json=_valid_config())
+        result, _, _ = await self.handler(execute_command)
+
+        pod_entries = [r for r in result["associated_resources"] if r["resource_type"] == "pod"]
+        self.assertEqual(len(pod_entries), 1)
+        self.assertEqual(pod_entries[0]["resource_name"], "my-terminal-pod-1706565890")
+
     async def test_service_suffix_without_timestamp_is_stripped(self) -> None:
         self.container_maker_client.create_container.return_value = SimpleNamespace(
             container_id="pod-abc123", container_name="my-terminal-service", container_ip=None,

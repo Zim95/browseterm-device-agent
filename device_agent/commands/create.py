@@ -62,7 +62,19 @@ def make_handler(container_maker_client: ContainerMakerClient, cloud_client):
             # the real one. The container showed "IP Address: Pending" forever despite the pod
             # being genuinely Running with a real IP the whole time.
             "ip_address": getattr(response, "container_ip", None),
-            "associated_resources": {"network_name": cfg["network_name"]},
+            # response.container_name (BEFORE the strip above) is container-maker's own raw,
+            # timestamped pod name (e.g. "app-pod-1706565890") - the exact identifier
+            # container-maker's find_container_pod/_stored_pod_name expects to find here on a
+            # later SAVE. A second real bug caught live (2026-09-30): this was never recorded at
+            # all (associated_resources only ever held network_name), so _stored_pod_name always
+            # returned None and every save silently fell back to container-maker's less precise
+            # `app`-label match instead - harmless only as long as no two pods ever share that
+            # label, which is exactly the scenario a real orphaned-pod incident that same session
+            # hit ("Cannot uniquely resolve the pod ... N pods share label").
+            "associated_resources": [
+                {"resource_type": "pod", "resource_name": response.container_name},
+                {"resource_type": "network", "resource_name": cfg["network_name"]},
+            ],
         }, None, None
 
     return handle
