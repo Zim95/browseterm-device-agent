@@ -135,6 +135,31 @@ spec:
             limits:
               cpu: 250m
               memory: 256Mi
+          ports:
+            - name: local-api
+              containerPort: 50061
+              protocol: TCP
+          # Investigated 2026-09-30: status_monitor/reaper/socket-ssh/snapshot_job all saw
+          # occasional "Connection refused" reaching browseterm-device-agent-local:50061,
+          # non-fatal (every caller treats this local API as best-effort/retried) but never
+          # explained. Root cause: this Deployment's own strategy is Recreate (never two pods of
+          # a single-device-identity Deployment at once, by design - see that field's own
+          # comment) and, until now, had NO readinessProbe at all - main.py's own
+          # local_api_server.start() genuinely does run before it starts accepting Device Control
+          # commands, but with no readiness gate, Kubernetes added a brand-new pod straight to
+          # this Service's endpoints the instant kubelet reported it Running, not once
+          # local_api_server.start() had actually completed and port 50061 was really listening.
+          # A tcpSocket check closes that specific gap (new pod only joins the Service once
+          # something is genuinely listening); it cannot remove the OTHER, larger and inherent
+          # gap where the OLD pod is already gone and the NEW one hasn't started at all yet - that
+          # gap is what Recreate means, unavoidable for this component's design, and exactly what
+          # every caller's own retry/best-effort handling already exists to ride out.
+          readinessProbe:
+            tcpSocket:
+              port: 50061
+            initialDelaySeconds: 1
+            periodSeconds: 3
+            failureThreshold: 3
           livenessProbe:
             exec:
               # TODO (Part 24): a real liveness signal (e.g. a small local health file the
