@@ -2,11 +2,19 @@ import json
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock
 
+from device_agent.clients.cloud_client import CloudClientError
 from device_agent.local_api.service import LocalDeviceAgentServicer
 from device_agent.state.placement_cache import PlacementCache
 from device_control_spec.local_device_agent_pb2 import (
-    GetTunnelGenerationRequest, StatusReport, SnapshotProgress, HibernateRequest, TerminalTicketRequest, TunnelReport,
+    AllocateSnapshotRequest, Empty, GetContainerRequest, GetIdleContainersRequest, GetTunnelGenerationRequest,
+    ReconcileResourcesRequest, SnapshotResultReport, StatusReport, SnapshotProgress, HibernateRequest,
+    TerminalTicketRequest, TunnelReport, UpdateKubernetesIdRequest,
 )
+
+
+class _AbortCalled(Exception):
+    """Raised by the mock context.abort() below, mirroring grpc.aio's own real behavior that
+    abort() never returns - it always raises to stop the RPC handler."""
 
 
 class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
@@ -105,6 +113,119 @@ class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
         self.cloud_client.get_tunnel_generation.return_value = None
         response = await self.servicer.GetTunnelGeneration(GetTunnelGenerationRequest(), context=None)
         self.assertEqual(response.generation, 0)
+
+    # Part 12 completion - unlike GetTunnelGeneration above, these abort the gRPC call on
+    # CloudClientError rather than returning a safe default (see service.py's own docstring).
+
+    def _abort_context(self) -> AsyncMock:
+        context = AsyncMock()
+        context.abort.side_effect = _AbortCalled()
+        return context
+
+    async def test_get_active_container_ids_success(self) -> None:
+        self.cloud_client.get_active_container_ids.return_value = ["c1", "c2"]
+        response = await self.servicer.GetActiveContainerIds(Empty(), context=None)
+        self.assertEqual(list(response.container_ids), ["c1", "c2"])
+
+    async def test_get_active_container_ids_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.get_active_container_ids.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.GetActiveContainerIds(Empty(), context=context)
+        context.abort.assert_awaited_once()
+
+    async def test_reconcile_device_resources_forwards_lists_and_map(self) -> None:
+        ack = await self.servicer.ReconcileDeviceResources(
+            ReconcileResourcesRequest(running_container_ids=["c1"], running_pod_ips={"c1": "10.0.0.1"}),
+            context=None,
+        )
+        self.assertTrue(ack.ok)
+        self.cloud_client.reconcile_device_resources.assert_awaited_once_with(["c1"], {"c1": "10.0.0.1"})
+
+    async def test_reconcile_device_resources_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.reconcile_device_resources.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.ReconcileDeviceResources(ReconcileResourcesRequest(), context=context)
+
+    async def test_get_idle_containers_success(self) -> None:
+        self.cloud_client.get_idle_containers.return_value = ["c1"]
+        response = await self.servicer.GetIdleContainers(GetIdleContainersRequest(idle_threshold_seconds=1800), context=None)
+        self.assertEqual(list(response.container_ids), ["c1"])
+        self.cloud_client.get_idle_containers.assert_awaited_once_with(1800)
+
+    async def test_get_idle_containers_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.get_idle_containers.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.GetIdleContainers(GetIdleContainersRequest(idle_threshold_seconds=1800), context=context)
+
+    async def test_allocate_snapshot_success(self) -> None:
+        self.cloud_client.allocate_snapshot.return_value = {
+            "id": "s1", "version_sequence": 1, "version": "v1", "image_repository": "r", "status": "Pending",
+        }
+        response = await self.servicer.AllocateSnapshot(
+            AllocateSnapshotRequest(container_id="c1", request_id="req-1"), context=None,
+        )
+        self.assertEqual(response.id, "s1")
+        self.assertEqual(response.status, "Pending")
+        self.cloud_client.allocate_snapshot.assert_awaited_once_with("c1", "req-1")
+
+    async def test_allocate_snapshot_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.allocate_snapshot.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.AllocateSnapshot(AllocateSnapshotRequest(container_id="c1", request_id="req-1"), context=context)
+
+    async def test_report_snapshot_result_forwards_optional_fields(self) -> None:
+        ack = await self.servicer.ReportSnapshotResult(
+            SnapshotResultReport(container_id="c1", snapshot_id="s1", status="Succeeded", image_reference="img:1"),
+            context=None,
+        )
+        self.assertTrue(ack.ok)
+        self.cloud_client.report_snapshot_result.assert_awaited_once_with(
+            "c1", "s1", "Succeeded", image_reference="img:1", registry_digest=None, error_detail=None,
+        )
+
+    async def test_report_snapshot_result_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.report_snapshot_result.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.ReportSnapshotResult(
+                SnapshotResultReport(container_id="c1", snapshot_id="s1", status="Failed"), context=context,
+            )
+
+    async def test_get_container_found(self) -> None:
+        self.cloud_client.get_container.return_value = {"id": "c1", "name": "my-ws"}
+        response = await self.servicer.GetContainer(GetContainerRequest(container_id="c1"), context=None)
+        self.assertTrue(response.found)
+        self.assertEqual(json.loads(response.container_json)["id"], "c1")
+
+    async def test_get_container_not_found(self) -> None:
+        self.cloud_client.get_container.return_value = None
+        response = await self.servicer.GetContainer(GetContainerRequest(container_id="c1"), context=None)
+        self.assertFalse(response.found)
+
+    async def test_get_container_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.get_container.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.GetContainer(GetContainerRequest(container_id="c1"), context=context)
+
+    async def test_update_container_kubernetes_id_success(self) -> None:
+        ack = await self.servicer.UpdateContainerKubernetesId(
+            UpdateKubernetesIdRequest(container_id="c1", kubernetes_id="new-pod-uid"), context=None,
+        )
+        self.assertTrue(ack.ok)
+        self.cloud_client.update_container_kubernetes_id.assert_awaited_once_with("c1", "new-pod-uid")
+
+    async def test_update_container_kubernetes_id_aborts_on_cloud_error(self) -> None:
+        self.cloud_client.update_container_kubernetes_id.side_effect = CloudClientError("down")
+        context = self._abort_context()
+        with self.assertRaises(_AbortCalled):
+            await self.servicer.UpdateContainerKubernetesId(
+                UpdateKubernetesIdRequest(container_id="c1", kubernetes_id="x"), context=context,
+            )
 
 
 class TestLocalDeviceAgentServicerPlacementCache(IsolatedAsyncioTestCase):

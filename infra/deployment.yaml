@@ -212,7 +212,9 @@ spec:
     # correct. tunnel_registrar runs as a SIDECAR container inside the ngrok-agent Deployment's
     # Pod (see socket-ssh/infra/deployment/deployment.yaml) - there is no separate
     # "tunnel-registrar" pod/label to select, so its entry below is `app: ngrok-agent`, the label
-    # that Pod actually carries.
+    # that Pod actually carries. `app: container-maker` added when Part 12 finished: it now calls
+    # GetContainer/UpdateContainerKubernetesId here too, instead of Cloud directly with the global
+    # internal token (label confirmed from container-maker/infra/k8s/deployment/deployment.yaml).
     - from:
         - podSelector:
             matchLabels:
@@ -229,6 +231,9 @@ spec:
         - podSelector:
             matchLabels:
               app: ngrok-agent
+        - podSelector:
+            matchLabels:
+              app: container-maker
       ports:
         - port: 50061
           protocol: TCP

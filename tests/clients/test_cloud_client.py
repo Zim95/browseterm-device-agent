@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 
-from device_agent.clients.cloud_client import CloudClient
+from device_agent.clients.cloud_client import CloudClient, CloudClientError
 
 
 class TestCloudClient(IsolatedAsyncioTestCase):
@@ -202,3 +202,119 @@ class TestCloudClient(IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
         self.assertEqual(self.client._client.post.await_count, 1)
+
+    # Part 12 completion - see cloud_client.py's own docstring for why these raise CloudClientError
+    # on failure instead of returning a safe default.
+
+    async def test_get_active_container_ids_success(self) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"container_ids": ["c1", "c2"]}
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_active_container_ids()
+
+        self.assertEqual(result, ["c1", "c2"])
+        self.client._client.get.assert_awaited_once_with("/devices/d1/active-containers")
+
+    async def test_get_active_container_ids_failure_raises(self) -> None:
+        self.client._client.get.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.get_active_container_ids()
+
+    async def test_reconcile_device_resources_success(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=200)
+
+        await self.client.reconcile_device_resources(["c1"], {"c1": "10.0.0.1"})
+
+        self.client._client.post.assert_awaited_once_with(
+            "/devices/d1/resources/reconcile",
+            json={"running_container_ids": ["c1"], "running_pod_ips": {"c1": "10.0.0.1"}},
+        )
+
+    async def test_reconcile_device_resources_failure_raises(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.reconcile_device_resources([], {})
+
+    async def test_get_idle_containers_returns_just_ids(self) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"containers": [{"id": "c1"}, {"id": "c2"}]}
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_idle_containers(1800)
+
+        self.assertEqual(result, ["c1", "c2"])
+        self.client._client.get.assert_awaited_once_with(
+            "/devices/d1/containers/idle", params={"idle_threshold_seconds": 1800},
+        )
+
+    async def test_get_idle_containers_failure_raises(self) -> None:
+        self.client._client.get.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.get_idle_containers(1800)
+
+    async def test_allocate_snapshot_success(self) -> None:
+        response = MagicMock(status_code=201)
+        response.json.return_value = {"snapshot": {"id": "s1", "version_sequence": 1, "version": "v1", "image_repository": "r", "status": "Pending"}}
+        self.client._client.post.return_value = response
+
+        result = await self.client.allocate_snapshot("c1", "req-1")
+
+        self.assertEqual(result["id"], "s1")
+        self.client._client.post.assert_awaited_once_with(
+            "/devices/d1/containers/c1/snapshots/allocate", json={"request_id": "req-1"},
+        )
+
+    async def test_allocate_snapshot_failure_raises(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.allocate_snapshot("c1", "req-1")
+
+    async def test_report_snapshot_result_success(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=200)
+
+        await self.client.report_snapshot_result("c1", "s1", "Succeeded", image_reference="img:1")
+
+        self.client._client.post.assert_awaited_once_with(
+            "/devices/d1/containers/c1/snapshots/s1/report",
+            json={"status": "Succeeded", "image_reference": "img:1"},
+        )
+
+    async def test_report_snapshot_result_failure_raises(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.report_snapshot_result("c1", "s1", "Failed")
+
+    async def test_get_container_found(self) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"container": {"id": "c1", "name": "my-ws"}}
+        self.client._client.get.return_value = response
+
+        result = await self.client.get_container("c1")
+
+        self.assertEqual(result["id"], "c1")
+        self.client._client.get.assert_awaited_once_with("/devices/d1/containers/c1")
+
+    async def test_get_container_not_found_returns_none(self) -> None:
+        self.client._client.get.return_value = MagicMock(status_code=404)
+        result = await self.client.get_container("c1")
+        self.assertIsNone(result)
+
+    async def test_get_container_other_failure_raises(self) -> None:
+        self.client._client.get.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.get_container("c1")
+
+    async def test_update_container_kubernetes_id_success(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=200)
+
+        await self.client.update_container_kubernetes_id("c1", "new-pod-uid")
+
+        self.client._client.post.assert_awaited_once_with(
+            "/devices/d1/containers/c1/kubernetes-id", json={"kubernetes_id": "new-pod-uid"},
+        )
+
+    async def test_update_container_kubernetes_id_failure_raises(self) -> None:
+        self.client._client.post.return_value = MagicMock(status_code=500)
+        with self.assertRaises(CloudClientError):
+            await self.client.update_container_kubernetes_id("c1", "new-pod-uid")

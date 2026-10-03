@@ -10,12 +10,30 @@ ConsumeTerminalTicket needs the actual SSH target right now.
 get_save_status is a third such synchronous-answer call: save_execution.py's perform_save() polls
 it in a loop, since snapshot_job reports the real completion signal directly to Cloud (not to
 Device Agent), and Device Agent has no other way to learn a save's confirmed outcome.
+
+get_active_container_ids/reconcile_device_resources/get_idle_containers/allocate_snapshot/
+report_snapshot_result/get_container/update_container_kubernetes_id (finishing Part 12) are a
+fourth class: unlike get_tunnel_generation/get_save_status above, a wrong safe-default here could
+cause real harm (e.g. an empty active-container list could make status_monitor think every
+genuinely-running container is lost) - so these raise CloudClientError on any failure instead of
+returning a default, and local_api/service.py aborts the gRPC call so the original caller
+(status_monitor/reaper/snapshot_job/container-maker) sees the same kind of failure their old
+direct-to-Cloud CloudClientError already gave them.
 '''
 from typing import Optional
 
 import httpx
 
 from device_agent.clients.retry import call_with_retry
+
+
+class CloudClientError(Exception):
+    """Raised by the Part-12-completion methods below on any non-2xx response or transport-level
+    failure - see this module's own docstring for why these can't use a safe-default convention."""
+
+    def __init__(self, message: str):
+        self.message = message
+        super().__init__(f"Cloud API error: {message}")
 
 # request_hibernate is idempotent (a duplicate collapses to a no-op via Cloud's own partial
 # unique index on device_commands - see reaper's own request_hibernate docstring for the
@@ -166,3 +184,136 @@ class CloudClient:
         except httpx.HTTPError:
             return False
         return response.status_code == 200
+
+    async def get_active_container_ids(self) -> list[str]:
+        '''GET /devices/{device_id}/active-containers (finishing Part 12 - status_monitor's own
+        durability check, formerly a direct internal-token call). Raises CloudClientError on any
+        failure - see this module's own docstring for why no safe default exists here.'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.get(f"/devices/{self.device_id}/active-containers"),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code != 200:
+            raise CloudClientError(f"unexpected status {response.status_code}")
+        return response.json().get("container_ids", [])
+
+    async def reconcile_device_resources(self, running_container_ids: list[str], running_pod_ips: dict) -> None:
+        '''POST /devices/{device_id}/resources/reconcile (finishing Part 12 - status_monitor's own
+        resource-drift repair, formerly a direct internal-token call).'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post(
+                    f"/devices/{self.device_id}/resources/reconcile",
+                    json={"running_container_ids": running_container_ids, "running_pod_ips": running_pod_ips},
+                ),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code != 200:
+            raise CloudClientError(f"unexpected status {response.status_code}")
+
+    async def get_idle_containers(self, idle_threshold_seconds: int) -> list[str]:
+        '''GET /devices/{device_id}/containers/idle (finishing Part 12 - reaper's own idle sweep,
+        formerly a direct internal-token call). Reaper only ever reads each row's own id, so this
+        returns just the ids rather than the full container rows the old HTTP response carried.'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.get(
+                    f"/devices/{self.device_id}/containers/idle",
+                    params={"idle_threshold_seconds": idle_threshold_seconds},
+                ),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code != 200:
+            raise CloudClientError(f"unexpected status {response.status_code}")
+        return [c["id"] for c in response.json().get("containers", [])]
+
+    async def allocate_snapshot(self, container_id: str, request_id: str) -> dict:
+        '''POST /devices/{device_id}/containers/{container_id}/snapshots/allocate (finishing Part
+        12 - snapshot_job's own save-attempt allocation, formerly a direct internal-token call).
+        Returns the same {"id", "version_sequence", "version", "image_repository", "status"}
+        shape the old HTTP response's "snapshot" key carried.'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post(
+                    f"/devices/{self.device_id}/containers/{container_id}/snapshots/allocate",
+                    json={"request_id": request_id},
+                ),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code not in (200, 201):
+            raise CloudClientError(f"unexpected status {response.status_code}")
+        return response.json()["snapshot"]
+
+    async def report_snapshot_result(
+        self, container_id: str, snapshot_id: str, status: str,
+        image_reference: Optional[str] = None, registry_digest: Optional[str] = None,
+        error_detail: Optional[str] = None,
+    ) -> None:
+        '''POST /devices/{device_id}/containers/{container_id}/snapshots/{snapshot_id}/report
+        (finishing Part 12 - snapshot_job's own save-attempt reporting, formerly a direct
+        internal-token call). This is the only signal anywhere that a real build+push
+        succeeded/failed, so it retries noticeably harder than the default before giving up,
+        matching the old direct-to-Cloud call's own max_attempts=5/max_delay_seconds=30.0.'''
+        body: dict = {"status": status}
+        if image_reference is not None:
+            body["image_reference"] = image_reference
+        if registry_digest is not None:
+            body["registry_digest"] = registry_digest
+        if error_detail is not None:
+            body["error_detail"] = error_detail
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post(
+                    f"/devices/{self.device_id}/containers/{container_id}/snapshots/{snapshot_id}/report",
+                    json=body,
+                ),
+                is_retryable=_is_retryable_transport_error,
+                max_attempts=5,
+                max_delay_seconds=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code != 200:
+            raise CloudClientError(f"unexpected status {response.status_code}")
+
+    async def get_container(self, container_id: str) -> Optional[dict]:
+        '''GET /devices/{device_id}/containers/{container_id} (finishing Part 12 -
+        container-maker's own save() lookup, formerly a direct internal-token call). Returns None
+        on a 404, matching the old direct-DB-backed lookup's own "no row" contract.'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.get(f"/devices/{self.device_id}/containers/{container_id}"),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise CloudClientError(f"unexpected status {response.status_code}")
+        return response.json()["container"]
+
+    async def update_container_kubernetes_id(self, container_id: str, kubernetes_id: str) -> None:
+        '''POST /devices/{device_id}/containers/{container_id}/kubernetes-id (finishing Part 12 -
+        container-maker's own save() self-heal, formerly a direct internal-token call).'''
+        try:
+            response = await call_with_retry(
+                lambda: self._client.post(
+                    f"/devices/{self.device_id}/containers/{container_id}/kubernetes-id",
+                    json={"kubernetes_id": kubernetes_id},
+                ),
+                is_retryable=_is_retryable_transport_error,
+            )
+        except httpx.HTTPError as e:
+            raise CloudClientError(str(e)) from e
+        if response.status_code != 200:
+            raise CloudClientError(f"unexpected status {response.status_code}")
