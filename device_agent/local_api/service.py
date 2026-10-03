@@ -147,6 +147,7 @@ class LocalDeviceAgentServicer(local_device_agent_pb2_grpc.LocalDeviceAgentServi
         return SnapshotAllocation(
             id=snapshot["id"], version_sequence=snapshot["version_sequence"], version=snapshot["version"],
             image_repository=snapshot["image_repository"], status=snapshot["status"],
+            image_tag=snapshot["image_tag"],
         )
 
     async def ReportSnapshotResult(self, request, context) -> Ack:

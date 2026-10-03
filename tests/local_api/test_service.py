@@ -162,13 +162,15 @@ class TestLocalDeviceAgentServicer(IsolatedAsyncioTestCase):
 
     async def test_allocate_snapshot_success(self) -> None:
         self.cloud_client.allocate_snapshot.return_value = {
-            "id": "s1", "version_sequence": 1, "version": "v1", "image_repository": "r", "status": "Pending",
+            "id": "s1", "version_sequence": 1, "version": "v1", "image_repository": "r",
+            "image_tag": "u_user-a_c_c1_v_v1", "status": "Pending",
         }
         response = await self.servicer.AllocateSnapshot(
             AllocateSnapshotRequest(container_id="c1", request_id="req-1"), context=None,
         )
         self.assertEqual(response.id, "s1")
         self.assertEqual(response.status, "Pending")
+        self.assertEqual(response.image_tag, "u_user-a_c_c1_v_v1")
         self.cloud_client.allocate_snapshot.assert_awaited_once_with("c1", "req-1")
 
     async def test_allocate_snapshot_aborts_on_cloud_error(self) -> None:
